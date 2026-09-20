@@ -59,5 +59,48 @@ const usHtml = els["uss"].children.map((c) => c.innerHTML).join("");
 check(usHtml.includes("左侧颈部淋巴结肿大"), "超声结论渲染");
 check(els["us-title"].hidden === false, "超声标题显示");
 
+// ---- 边界场景：长期归档大数据量 + 空明细报告 ----
+{
+  // 构造 60 天每天一份血常规 → 趋势图应只画最近 40 点、标签抽稀不崩
+  const big = JSON.parse(JSON.stringify(sample));
+  big.lab_reports = [];
+  for (let d = 60; d >= 1; d--) {
+    const day = String(d % 28 + 1).padStart(2, "0");
+    const mon = d > 28 ? "8" : "9";
+    big.lab_reports.push({
+      id: "BIG" + d,
+      audit_time: `2026/${mon}/${day} 8:30:00`,
+      project: "血常规",
+      items: [
+        { name: "白细胞", result: (2 + Math.sin(d) ).toFixed(2), flag: "↓", ref_lo: "4.00", ref_hi: "10.00", ref_text: "4~10" },
+        { name: "血红蛋白", result: String(90 + (d % 15)), flag: "↓", ref_lo: "120", ref_hi: "160", ref_text: "120~160" },
+      ],
+    });
+  }
+  // 一份明细为空的报告（抓取失败待重试）不应显示"全部正常"
+  big.lab_reports.push({ id: "EMPTY1", audit_time: "2026/9/20 9:00:00", project: "异常结构报告", items: [] });
+  // 怪参考范围不应产生 NaN 图表
+  big.lab_reports.push({
+    id: "WEIRD1", audit_time: "2026/9/20 9:10:00", project: "定性报告",
+    items: [{ name: "某定性项", result: "阴性", flag: "", ref_lo: null, ref_hi: null, ref_text: "阴性" }],
+  });
+
+  for (const id of Object.keys(els)) { els[id].children = []; els[id].innerHTML = ""; els[id].textContent = ""; }
+  // 直接调 renderAll（app.js 已在上方 import 作用域内定义）
+  const renderAllFn = globalThis.__renderAll;
+  if (typeof renderAllFn !== "function") { console.log("FAIL: renderAll 未暴露"); fail++; }
+  else {
+    renderAllFn(big);
+    const th = els["trends"].children.map((c) => c.innerHTML).join("");
+    const circles = (th.match(/<circle/g) || []).length;
+    check(circles > 0 && circles <= 40 * 5, "大数据量趋势图限点绘制(" + circles + "点)");
+    const labelCount = (th.match(/<text[^>]*>0/g) || []).length;
+    check(labelCount <= 50, "X轴标签已抽稀(" + labelCount + "个)");
+    check(!th.includes("NaN"), "图表无 NaN");
+    const lh = els["labs"].children.map((c) => c.innerHTML).join("");
+    check(lh.includes("明细抓取失败") && !lh.includes("异常结构报告 · 09:00 <span class=\"badge ok\""), "空明细报告正确标记");
+  }
+}
+
 console.log(fail === 0 ? "\n渲染冒烟测试全部通过 ✔" : `\n${fail} 项失败 ✘`);
 process.exit(fail ? 1 : 0);

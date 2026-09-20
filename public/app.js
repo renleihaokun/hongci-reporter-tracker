@@ -35,10 +35,15 @@ function showStatus(text, kind) {
 }
 
 /* ---------- SVG 趋势图 ---------- */
-function svgChart(points, ref) {
-  if (!points.length) return "";
+const MAX_CHART_POINTS = 40; // 归档变长后只画最近 N 个点，避免挤压失真
+
+function svgChart(allPoints, ref) {
+  if (!allPoints.length) return "";
+  const points = allPoints.length > MAX_CHART_POINTS ? allPoints.slice(-MAX_CHART_POINTS) : allPoints;
+  const labelEvery = Math.max(1, Math.ceil(points.length / 8)); // X 轴标签抽稀，最多约 8 个
   const W = 300, H = 96, L = 34, R = 8, T = 8, B = 16;
-  const vals = points.map((p) => p.v);
+  const vals = points.map((p) => p.v).filter((v) => Number.isFinite(v));
+  if (!vals.length) return "";
   let lo = Math.min(...vals, ...(ref ? [ref[0]] : []));
   let hi = Math.max(...vals, ...(ref ? [ref[1]] : []));
   if (hi === lo) { hi += 1; lo -= 1; }
@@ -61,7 +66,9 @@ function svgChart(points, ref) {
   points.forEach((p, i) => {
     const color = p.flag === "↑" ? "#d32f2f" : p.flag === "↓" ? "#1565c0" : "#1976d2";
     s += `<circle cx="${X(i).toFixed(1)}" cy="${Y(p.v).toFixed(1)}" r="2.6" fill="${color}"/>`;
-    s += `<text x="${X(i).toFixed(1)}" y="${H - 4}" font-size="8" text-anchor="middle" fill="#888">${esc(p.day)}</text>`;
+    if (i % labelEvery === 0 || i === points.length - 1) {
+      s += `<text x="${X(i).toFixed(1)}" y="${H - 4}" font-size="8" text-anchor="middle" fill="#888">${esc(p.day)}</text>`;
+    }
   });
   const last = points[points.length - 1];
   const lc = last.flag === "↑" ? "#d32f2f" : last.flag === "↓" ? "#1565c0" : "#333";
@@ -90,9 +97,10 @@ function renderAll(data) {
       for (const it of rep.items || []) {
         if (match(it.name)) {
           const v = parseFloat(it.result);
-          if (Number.isNaN(v)) continue;
+          if (!Number.isFinite(v)) continue;
           pts.push({ v, day: mmdd(rep.audit_time), flag: it.flag || "", t: parseDt(rep.audit_time) });
-          if (it.ref_lo && it.ref_hi) ref = [parseFloat(it.ref_lo), parseFloat(it.ref_hi)];
+          const rlo = parseFloat(it.ref_lo), rhi = parseFloat(it.ref_hi);
+          if (Number.isFinite(rlo) && Number.isFinite(rhi) && rhi > rlo) ref = [rlo, rhi];
         }
       }
     }
@@ -126,12 +134,15 @@ function renderAll(data) {
     h.textContent = day;
     labsEl.appendChild(h);
     for (const rep of byDay[day].sort((a, b) => parseDt(b.audit_time) - parseDt(a.audit_time))) {
-      const abn = (rep.items || []).filter((i) => i.flag === "↑" || i.flag === "↓");
+      const items = rep.items || [];
+      const abn = items.filter((i) => i.flag === "↑" || i.flag === "↓");
       const tm = /(\d{1,2}:\d{1,2})/.exec((rep.audit_time || "").split(" ")[1] || "")?.[1] || "";
-      const tag = abn.length
-        ? `<span class="badge hi">${abn.length}项异常</span>`
-        : `<span class="badge ok">全部正常</span>`;
-      const rows = (rep.items || []).map((it) => {
+      const tag = !items.length
+        ? `<span class="badge" style="background:#fff3e0;color:#e65100">明细抓取失败</span>`
+        : abn.length
+          ? `<span class="badge hi">${abn.length}项异常</span>`
+          : `<span class="badge ok">全部正常</span>`;
+      const rows = items.map((it) => {
         const isAbn = it.flag === "↑" || it.flag === "↓";
         const color = it.flag === "↑" ? "#d32f2f" : it.flag === "↓" ? "#1565c0" : "#222";
         return `<tr${isAbn ? ' class="abn"' : ""}><td>${esc(it.name)}</td>` +
@@ -189,25 +200,41 @@ $("btn-refresh").addEventListener("click", async () => {
   btn.innerHTML = '<span class="spin">⏳</span> 正在抓取医院数据…';
   showStatus("正在连接医院查询系统，请稍候（约需 10-30 秒）…");
   try {
-    const r = await fetch("/api/refresh", { method: "POST" });
-    if (r.status === 401) { needLogin(); return; }
-    const j = await r.json();
-    if (!j.ok) throw new Error(j.error || "刷新失败");
+    // 新报告较多时分批抓取（服务端每轮最多 40 份详情），自动连抓直到抓完
+    const acc = { new_lab_count: 0, new_us_count: 0, new_labs: [], new_us: [], failed_details: [], latest: null };
+    for (let round = 0; round < 5; round++) {
+      const r = await fetch("/api/refresh", { method: "POST" });
+      if (r.status === 401) { needLogin(); return; }
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.error || "刷新失败");
+      acc.new_lab_count += j.new_lab_count || 0;
+      acc.new_us_count += j.new_us_count || 0;
+      acc.new_labs.push(...(j.new_labs || []));
+      acc.new_us.push(...(j.new_us || []));
+      acc.failed_details.push(...(j.failed_details || []));
+      acc.latest = j.latest || acc.latest;
+      if (!j.has_more) break;
+      showStatus(`报告较多，正在分批抓取（已入库 ${acc.new_lab_count} 份）…`);
+    }
     const lines = [];
-    if (j.new_lab_count === 0 && j.new_us_count === 0) {
+    if (acc.new_lab_count === 0 && acc.new_us_count === 0) {
       lines.push("本次无新增报告，当前数据已是最新。");
     } else {
-      if (j.new_lab_count) {
-        lines.push(`新增检验报告 ${j.new_lab_count} 份：`);
-        for (const r2 of j.new_labs) lines.push(`· ${r2.project}（${r2.audit_time}）${r2.abnormal.length ? " 异常" + r2.abnormal.length + "项" : ""}`);
+      if (acc.new_lab_count) {
+        lines.push(`新增检验报告 ${acc.new_lab_count} 份：`);
+        for (const r2 of acc.new_labs) lines.push(`· ${r2.project}（${r2.audit_time}）${r2.abnormal.length ? " 异常" + r2.abnormal.length + "项" : ""}`);
       }
-      if (j.new_us_count) lines.push(`新增超声报告 ${j.new_us_count} 份`);
+      if (acc.new_us_count) lines.push(`新增超声报告 ${acc.new_us_count} 份`);
     }
-    if (j.latest && Object.keys(j.latest).length) {
+    if (acc.failed_details.length) {
+      lines.push("", `⚠️ ${acc.failed_details.length} 份报告明细抓取失败，下次刷新会自动重试：`);
+      for (const f of acc.failed_details) lines.push(`· ${f.project}（${f.audit_time}）`);
+    }
+    if (acc.latest && Object.keys(acc.latest).length) {
       lines.push("", "关键指标最新值：");
-      for (const [k, v] of Object.entries(j.latest)) lines.push(`· ${k}: ${v.value} ${v.flag || ""}（${v.date}）`);
+      for (const [k, v] of Object.entries(acc.latest)) lines.push(`· ${k}: ${v.value} ${v.flag || ""}（${v.date}）`);
     }
-    showStatus(lines.join("\n"), "success");
+    showStatus(lines.join("\n"), acc.failed_details.length ? "" : "success");
     await loadData();
   } catch (e) {
     showStatus("刷新失败：" + e.message, "error");
@@ -244,3 +271,8 @@ $("btn-logout").addEventListener("click", async () => {
 });
 
 loadData();
+
+// 测试钩子（浏览器中 window 存在，不生效；Node 冒烟测试用）
+if (typeof window === "undefined") {
+  globalThis.__renderAll = renderAll;
+}

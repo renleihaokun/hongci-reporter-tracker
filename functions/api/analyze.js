@@ -7,6 +7,11 @@ function parseDt(s) {
   return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0)).getTime();
 }
 
+function mmdd(s) {
+  const m = /(\d{4})[\/.](\d{1,2})[\/.](\d{1,2})/.exec(s || "");
+  return m ? `${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}` : (s || "").slice(0, 10);
+}
+
 const KEY_ITEMS = [
   ["白细胞", (n) => n === "白细胞"],
   ["血红蛋白", (n) => n === "血红蛋白"],
@@ -35,7 +40,7 @@ export async function onRequestPost(context) {
       for (const rep of reports) {
         for (const it of rep.items) {
           if (match(it.name) && !Number.isNaN(parseFloat(it.result))) {
-            series[label].push(`${rep.audit_time.slice(5, 10)}=${it.result}${it.flag || ""}`);
+            series[label].push(`${mmdd(rep.audit_time)}=${it.result}${it.flag || ""}`);
           }
         }
       }

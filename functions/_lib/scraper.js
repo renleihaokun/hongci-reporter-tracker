@@ -180,7 +180,9 @@ export async function scrapeAll(base, pid) {
   for (const u of usList) {
     u.uid = "US" + (await md5Hex(u.report_time + u.findings)).slice(0, 10);
   }
-  return { labList, usList };
+  // 页面含详情链接但解析为 0 → 医院页面结构可能已变化（解析规则失效预警）
+  const structureSuspect = labPage.includes("bh.asp?id=") && labList.length === 0;
+  return { labList, usList, structureSuspect };
 }
 
 export async function scrapeLabDetail(base, id) {

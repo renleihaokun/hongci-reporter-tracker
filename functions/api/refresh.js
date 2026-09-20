@@ -22,9 +22,17 @@ export async function onRequestPost(context) {
     return Response.json({ ok: false, error: "未配置环境变量 PATIENT_PID（住院号）" }, { status: 500 });
   }
   const base = env.HOSPITAL_BASE || DEFAULT_BASE;
+  // 免费版单次请求子请求上限 50，预留余量，单次最多抓 40 份新详情（剩余的下轮继续）
+  const MAX_DETAILS_PER_RUN = 40;
 
   try {
-    const { labList, usList } = await scrapeAll(base, pid);
+    const { labList, usList, structureSuspect } = await scrapeAll(base, pid);
+    if (structureSuspect) {
+      return Response.json({
+        ok: false,
+        error: "医院页面结构可能已变化：页面含报告链接但解析结果为 0，请检查 functions/_lib/scraper.js 的解析规则",
+      }, { status: 502 });
+    }
 
     // 已归档的 ID
     const existing = new Set();
@@ -34,15 +42,25 @@ export async function onRequestPost(context) {
     const rowsUs = await env.DB.prepare("SELECT uid FROM us_reports").all();
     for (const r of rowsUs.results || []) existingUs.add(r.uid);
 
-    // 增量抓取检验详情
+    // 增量抓取检验详情（新的在前，先抓最新的；超限部分下轮继续）
+    const pending = labList.filter((e) => !existing.has(e.id));
+    const batch = pending.slice(0, MAX_DETAILS_PER_RUN);
+    const hasMore = pending.length > batch.length;
     const newLabs = [];
-    for (const entry of labList) {
-      if (existing.has(entry.id)) continue;
+    const failedDetails = [];
+    for (const entry of batch) {
       let items = [];
+      let okFetch = false;
       try {
         items = await scrapeLabDetail(base, entry.id);
+        okFetch = true;
       } catch (e) {
         console.error("detail fetch failed", entry.id, e);
+      }
+      if (!okFetch || items.length === 0) {
+        // 抓取失败或明细为空：不写库，下次刷新自动重试，避免"空明细"被永久归档
+        failedDetails.push({ id: entry.id, project: entry.project, audit_time: entry.audit_time });
+        continue;
       }
       await env.DB.prepare(
         "INSERT OR IGNORE INTO lab_reports (id, audit_time, project, reviewer, items_json) VALUES (?, ?, ?, ?, ?)"
@@ -60,17 +78,23 @@ export async function onRequestPost(context) {
       newUs.push(u);
     }
 
-    // 患者信息
-    const patient = labList.length
-      ? { name: labList[0].name, gender: labList[0].gender, age: labList[0].age, bed: labList[0].bed, dept: usList[0]?.dept || "" }
-      : {};
+    // 患者信息（仅当列表有数据时更新；出院后医院不再返回报告，保留最后一次信息）
     const now = new Date().toISOString();
-    await env.DB.batch([
-      env.DB.prepare("INSERT INTO meta (key, value) VALUES ('patient_json', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-        .bind(JSON.stringify(patient)),
+    const stmts = [
       env.DB.prepare("INSERT INTO meta (key, value) VALUES ('last_refresh', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
         .bind(now),
-    ]);
+    ];
+    if (labList.length) {
+      const patient = {
+        name: labList[0].name, gender: labList[0].gender, age: labList[0].age,
+        bed: labList[0].bed, dept: usList[0]?.dept || "",
+      };
+      stmts.push(
+        env.DB.prepare("INSERT INTO meta (key, value) VALUES ('patient_json', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+          .bind(JSON.stringify(patient))
+      );
+    }
+    await env.DB.batch(stmts);
 
     // 关键指标最新值（从新增 + 已有中各报告最近一次）
     const latest = {};
@@ -95,6 +119,8 @@ export async function onRequestPost(context) {
       ok: true,
       new_lab_count: newLabs.length,
       new_us_count: newUs.length,
+      has_more: hasMore,
+      failed_details: failedDetails,
       new_labs: newLabs.map((r) => ({
         id: r.id, project: r.project, audit_time: r.audit_time,
         abnormal: r.items.filter((i) => i.flag === "↑" || i.flag === "↓")

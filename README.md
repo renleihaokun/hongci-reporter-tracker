@@ -113,7 +113,7 @@ node test/render.test.mjs   # 前端渲染逻辑
 
 - **刷新按钮多久点一次？** 血常规通常上午 8:30–9:30 审核发布，下午偶有特殊项目。建议上午十点左右点一次。
 - **页面会被外人看到吗？** 配置 `ACCESS_PASSWORD` 后，全站需密码登录（Cookie 30 天有效，家人输一次即可）。需要更强保护可再叠加 Cloudflare Access（Zero Trust → Access → 添加应用）。
-- **想自动定时刷新？** Pages Functions 不支持 Cron Trigger。可以再建一个独立的 Cloudflare Worker（Cron）每天 POST 一次你的 `/api/refresh`，或用 GitHub Actions 定时 `curl -X POST https://你的域名/api/refresh`。欢迎 PR 补充示例。
+- **想自动定时刷新？** Pages Functions 不支持 Cron Trigger。可以再建一个独立的 Cloudflare Worker（Cron）每天 POST 一次你的 `/api/refresh`，或用 GitHub Actions 定时触发。若配置了 `ACCESS_PASSWORD`，请求需带 Cookie：`hc_auth=<密码的SHA-256十六进制>`（例如 `curl -X POST -H "Cookie: hc_auth=$(echo -n '你的密码' | sha256sum | cut -d' ' -f1)" https://你的域名/api/refresh`）。欢迎 PR 补充示例。
 - **其他医院能用吗？** 抓取解析是针对该医院查询系统页面结构写的。若你所在医院使用相同系统（页面结构一致），改 `HOSPITAL_BASE` 即可；否则需改写 `functions/_lib/scraper.js` 的解析函数，欢迎提 Issue/PR。
 
 ## 隐私与免责
