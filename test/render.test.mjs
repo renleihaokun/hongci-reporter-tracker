@@ -21,7 +21,13 @@ function makeEl(id) {
   };
 }
 const els = {};
-for (const id of ["patient-title", "patient-sub", "btn-refresh", "btn-ai", "btn-logout", "status", "ai-box", "ai-model", "ai-text", "trends", "labs", "uss", "us-title"]) {
+for (const id of [
+  "patient-title", "patient-sub", "btn-refresh", "btn-ai", "btn-logout", "status", "ai-box", "ai-model", "ai-text",
+  "trends", "trends-empty", "labs", "uss", "us-title",
+  "hero", "hero-name", "hero-tags", "hero-meta", "hero-range", "hero-updated",
+  "stat-labs", "stat-us", "stat-abn", "stat-days",
+  "progress", "prog-text", "prog-log", "prog-bar", "prog-time",
+]) {
   els[id] = makeEl(id);
 }
 globalThis.document = {
@@ -47,6 +53,14 @@ const check = (cond, msg) => { console.log((cond ? "ok: " : "FAIL: ") + msg); if
 check(els["patient-title"].textContent.includes("张三"), "标题渲染患者名");
 check(els["patient-sub"].textContent.includes("床位 942"), "副标题渲染床位");
 check(els["btn-ai"].hidden === true, "未配置AI时按钮隐藏");
+check(els["hero"].hidden === false, "汇总卡显示");
+check(els["hero-name"].textContent.includes("张三"), "汇总卡渲染患者名");
+check(els["stat-labs"].textContent === "4", "统计:检验4份");
+check(els["stat-us"].textContent === "1", "统计:超声1份");
+check(els["stat-abn"].textContent === "14", "统计:异常14项");
+check(els["stat-days"].textContent === "4", "统计:归档4天");
+check(els["hero-tags"].innerHTML.includes("九病区血液科"), "汇总卡标签渲染");
+check(els["trends-empty"].hidden === true, "有趋势数据时空提示隐藏");
 const trendHtml = els["trends"].children.map((c) => c.innerHTML).join("");
 check(els["trends"].children.length === 5, "5 张趋势卡");
 check(trendHtml.includes("<svg"), "趋势 SVG 生成");

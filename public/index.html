@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#1976d2">
+<meta name="theme-color" content="#1565c0">
 <title>住院报告追踪</title>
 <link rel="stylesheet" href="styles.css">
 </head>
@@ -19,11 +19,38 @@
 </header>
 
 <main class="wrap">
+  <section class="card hero" id="hero" hidden>
+    <div class="hero-row">
+      <div class="hero-name" id="hero-name">—</div>
+      <div class="hero-tags" id="hero-tags"></div>
+    </div>
+    <div class="hero-meta" id="hero-meta"></div>
+    <div class="hero-stats">
+      <div class="stat"><div class="stat-num" id="stat-labs">0</div><div class="stat-label">检验报告</div></div>
+      <div class="stat"><div class="stat-num" id="stat-us">0</div><div class="stat-label">超声报告</div></div>
+      <div class="stat"><div class="stat-num warn" id="stat-abn">0</div><div class="stat-label">异常项目</div></div>
+      <div class="stat"><div class="stat-num" id="stat-days">0</div><div class="stat-label">归档天数</div></div>
+    </div>
+    <div class="hero-foot"><span id="hero-range"></span><span id="hero-updated"></span></div>
+  </section>
+
   <div class="actions">
     <button id="btn-refresh" class="btn btn-primary">🔄 获取最新报告</button>
     <button id="btn-ai" class="btn btn-secondary" hidden>🤖 AI 解读</button>
   </div>
+
+  <div id="progress" class="card progress" hidden>
+    <div class="prog-head">
+      <span class="spinner"></span>
+      <span id="prog-text">正在连接医院查询系统…</span>
+      <span class="prog-time" id="prog-time">0s</span>
+    </div>
+    <div class="prog-bar"><div class="prog-bar-fill" id="prog-bar"></div></div>
+    <div class="prog-log" id="prog-log"></div>
+  </div>
+
   <div id="status" class="status" hidden></div>
+
   <div id="ai-box" class="card ai-box" hidden>
     <div class="ai-title">🤖 AI 家属版解读 <span class="ai-model" id="ai-model"></span></div>
     <div id="ai-text" class="ai-text"></div>
@@ -31,6 +58,7 @@
 
   <h2>关键指标趋势</h2>
   <div class="grid" id="trends"></div>
+  <div id="trends-empty" class="card" hidden>暂无趋势数据，点击上方"获取最新报告"</div>
 
   <h2>检验报告</h2>
   <div id="labs"></div>

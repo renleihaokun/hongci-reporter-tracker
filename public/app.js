@@ -34,6 +34,21 @@ function showStatus(text, kind) {
   el.className = "status" + (kind ? " " + kind : "");
 }
 
+/* 不可重试的错误（如医院页面结构变化），直接抛给用户 */
+class FatalErr extends Error {}
+
+/* 本次刷新新增的报告标记（会话内高亮"新"） */
+function loadNewMarks() {
+  try {
+    return {
+      labs: new Set(JSON.parse(sessionStorage.getItem("hc_new_lab_ids") || "[]")),
+      us: new Set(JSON.parse(sessionStorage.getItem("hc_new_us_ids") || "[]")),
+    };
+  } catch {
+    return { labs: new Set(), us: new Set() };
+  }
+}
+
 /* ---------- SVG 趋势图 ---------- */
 const MAX_CHART_POINTS = 40; // 归档变长后只画最近 N 个点，避免挤压失真
 
@@ -41,7 +56,7 @@ function svgChart(allPoints, ref) {
   if (!allPoints.length) return "";
   const points = allPoints.length > MAX_CHART_POINTS ? allPoints.slice(-MAX_CHART_POINTS) : allPoints;
   const labelEvery = Math.max(1, Math.ceil(points.length / 8)); // X 轴标签抽稀，最多约 8 个
-  const W = 300, H = 96, L = 34, R = 8, T = 8, B = 16;
+  const W = 320, H = 118, L = 40, R = 10, T = 10, B = 18;
   const vals = points.map((p) => p.v).filter((v) => Number.isFinite(v));
   if (!vals.length) return "";
   let lo = Math.min(...vals, ...(ref ? [ref[0]] : []));
@@ -53,43 +68,72 @@ function svgChart(allPoints, ref) {
   const Y = (v) => T + (H - T - B) * (1 - (v - lo) / (hi - lo));
   const fmt = (x) => String(parseFloat(x.toPrecision(4)));
   let s = `<svg viewBox="0 0 ${W} ${H}" class="chart">`;
+  // 参考区间绿色带
   if (ref) {
     const y1 = Y(ref[1]), y2 = Y(ref[0]);
     s += `<rect x="${L}" y="${y1.toFixed(1)}" width="${W - L - R}" height="${(y2 - y1).toFixed(1)}" fill="#e8f5e9"/>`;
-    s += `<text x="${L - 4}" y="${(y1 + 3).toFixed(1)}" font-size="8" text-anchor="end" fill="#43a047">${fmt(ref[1])}</text>`;
-    s += `<text x="${L - 4}" y="${(y2 + 3).toFixed(1)}" font-size="8" text-anchor="end" fill="#43a047">${fmt(ref[0])}</text>`;
+    s += `<text x="${L - 4}" y="${(y1 + 3).toFixed(1)}" font-size="9" text-anchor="end" fill="#43a047">${fmt(ref[1])}</text>`;
+    s += `<text x="${L - 4}" y="${(y2 + 3).toFixed(1)}" font-size="9" text-anchor="end" fill="#43a047">${fmt(ref[0])}</text>`;
   }
+  // 水平网格线
+  for (let g = 1; g <= 3; g++) {
+    const gy = T + (H - T - B) * (g / 4);
+    s += `<line x1="${L}" y1="${gy.toFixed(1)}" x2="${W - R}" y2="${gy.toFixed(1)}" stroke="#eceff1" stroke-width="1"/>`;
+  }
+  // 折线 + 面积填充
   if (points.length > 1) {
     const d = points.map((p, i) => `${i ? "L" : "M"}${X(i).toFixed(1)},${Y(p.v).toFixed(1)}`).join(" ");
-    s += `<path d="${d}" fill="none" stroke="#1976d2" stroke-width="1.6"/>`;
+    const baseY = H - B;
+    s += `<path d="${d} L${X(points.length - 1).toFixed(1)},${baseY} L${X(0).toFixed(1)},${baseY} Z" fill="rgba(25,118,210,.08)"/>`;
+    s += `<path d="${d}" fill="none" stroke="#1976d2" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
   }
   points.forEach((p, i) => {
     const color = p.flag === "↑" ? "#d32f2f" : p.flag === "↓" ? "#1565c0" : "#1976d2";
-    s += `<circle cx="${X(i).toFixed(1)}" cy="${Y(p.v).toFixed(1)}" r="2.6" fill="${color}"/>`;
+    s += `<circle cx="${X(i).toFixed(1)}" cy="${Y(p.v).toFixed(1)}" r="2.8" fill="${color}"/>`;
     if (i % labelEvery === 0 || i === points.length - 1) {
-      s += `<text x="${X(i).toFixed(1)}" y="${H - 4}" font-size="8" text-anchor="middle" fill="#888">${esc(p.day)}</text>`;
+      s += `<text x="${X(i).toFixed(1)}" y="${H - 5}" font-size="9" text-anchor="middle" fill="#90a4ae">${esc(p.day)}</text>`;
     }
   });
   const last = points[points.length - 1];
   const lc = last.flag === "↑" ? "#d32f2f" : last.flag === "↓" ? "#1565c0" : "#333";
-  s += `<text x="${X(points.length - 1).toFixed(1)}" y="${(Y(last.v) - 5).toFixed(1)}" font-size="10" font-weight="bold" text-anchor="middle" fill="${lc}">${fmt(last.v)}</text>`;
+  s += `<text x="${X(points.length - 1).toFixed(1)}" y="${(Y(last.v) - 6).toFixed(1)}" font-size="11" font-weight="bold" text-anchor="middle" fill="${lc}">${fmt(last.v)}</text>`;
   return s + "</svg>";
 }
 
 /* ---------- 渲染 ---------- */
 function renderAll(data) {
   const p = data.patient || {};
+  const upd = data.last_refresh ? new Date(data.last_refresh).toLocaleString("zh-CN", { hour12: false }) : "从未";
   $("patient-title").textContent = p.name ? `${p.name} 的住院报告` : "住院报告追踪";
   const bits = [p.gender, p.age && p.age + "岁", p.bed && "床位 " + p.bed, p.dept].filter(Boolean).join(" · ");
-  const upd = data.last_refresh ? new Date(data.last_refresh).toLocaleString("zh-CN", { hour12: false }) : "从未";
   $("patient-sub").textContent = (bits ? bits + " · " : "") + "上次更新 " + upd;
   $("btn-ai").hidden = !data.ai_enabled;
   $("btn-logout").hidden = !data.auth_required;
 
-  // 趋势
   const labs = (data.lab_reports || []).slice().sort((a, b) => parseDt(a.audit_time) - parseDt(b.audit_time));
+  const uss = data.us_reports || [];
+  const marks = loadNewMarks();
+
+  /* 患者信息汇总卡 */
+  const abnCount = labs.reduce((n, r) => n + (r.items || []).filter((i) => i.flag === "↑" || i.flag === "↓").length, 0);
+  const daySet = new Set(labs.map((r) => dayLabel(r.audit_time)).filter((d) => d !== "未知日期"));
+  const sortedDays = [...daySet].sort();
+  $("hero").hidden = false;
+  $("hero-name").textContent = p.name || "住院报告";
+  $("hero-tags").innerHTML = [p.gender, p.age && p.age + "岁", p.bed && "床位 " + p.bed, p.dept]
+    .filter(Boolean).map((t) => `<span class="tag">${esc(t)}</span>`).join("");
+  $("hero-meta").textContent = "数据来自院方公开查询系统 · 全量归档于 Cloudflare D1";
+  $("stat-labs").textContent = String(labs.length);
+  $("stat-us").textContent = String(uss.length);
+  $("stat-abn").textContent = String(abnCount);
+  $("stat-days").textContent = String(daySet.size);
+  $("hero-range").textContent = sortedDays.length ? `归档区间 ${sortedDays[0]} ~ ${sortedDays[sortedDays.length - 1]}` : "暂无归档数据";
+  $("hero-updated").textContent = "上次更新 " + upd;
+
+  /* 趋势 */
   const trendsEl = $("trends");
   trendsEl.innerHTML = "";
+  let anyTrend = false;
   for (const [label, match] of TREND_DEFS) {
     const pts = [];
     let ref = null;
@@ -105,6 +149,7 @@ function renderAll(data) {
       }
     }
     if (!pts.length) continue;
+    anyTrend = true;
     const last = pts[pts.length - 1];
     const cls = last.flag === "↑" ? "hi" : last.flag === "↓" ? "lo" : "ok";
     const arrow = last.flag === "↑" ? "↑偏高" : last.flag === "↓" ? "↓偏低" : "正常";
@@ -117,10 +162,11 @@ function renderAll(data) {
       svgChart(pts, ref);
     trendsEl.appendChild(card);
   }
+  $("trends-empty").hidden = anyTrend;
 
-  // 检验报告按日期分组
+  /* 检验报告按日期分组 */
   const byDay = {};
-  for (const rep of data.lab_reports || []) {
+  for (const rep of labs) {
     const d = dayLabel(rep.audit_time);
     (byDay[d] = byDay[d] || []).push(rep);
   }
@@ -137,6 +183,7 @@ function renderAll(data) {
       const items = rep.items || [];
       const abn = items.filter((i) => i.flag === "↑" || i.flag === "↓");
       const tm = /(\d{1,2}:\d{1,2})/.exec((rep.audit_time || "").split(" ")[1] || "")?.[1] || "";
+      const isNew = marks.labs.has(rep.id);
       const tag = !items.length
         ? `<span class="badge" style="background:#fff3e0;color:#e65100">明细抓取失败</span>`
         : abn.length
@@ -152,23 +199,23 @@ function renderAll(data) {
       const card = document.createElement("div");
       card.className = "card";
       card.innerHTML =
-        `<details${di === 0 ? " open" : ""}><summary><span>${esc(rep.project)} · ${esc(tm)} ${tag}</span><span class="arrow">▶</span></summary>` +
+        `<details${di === 0 ? " open" : ""}><summary><span>${esc(rep.project)} · ${esc(tm)} ${tag}${isNew ? '<span class="new-tag">新</span>' : ""}</span><span class="arrow">▶</span></summary>` +
         `<div class="detail-body"><table><tr><th>项目</th><th>结果</th><th>提示</th><th>参考范围</th></tr>${rows}</table>` +
         `<div class="rep-meta">标本号 ${esc(rep.id)} · 审核 ${esc(rep.audit_time)}</div></div></details>`;
       labsEl.appendChild(card);
     }
   });
 
-  // 超声
-  const uss = data.us_reports || [];
+  /* 超声 */
   $("us-title").hidden = !uss.length;
   const usEl = $("uss");
   usEl.innerHTML = "";
   for (const u of uss) {
+    const isNew = marks.us.has(u.report_time);
     const card = document.createElement("div");
     card.className = "card";
     card.innerHTML =
-      `<details><summary><span>超声 · ${esc(dayLabel(u.report_time))}</span><span class="arrow">▶</span></summary>` +
+      `<details><summary><span>超声 · ${esc(dayLabel(u.report_time))}${isNew ? '<span class="new-tag">新</span>' : ""}</span><span class="arrow">▶</span></summary>` +
       `<div class="detail-body"><div class="rep-meta">${esc(u.dept)} · 医生 ${esc(u.doctor)}</div>` +
       `<div class="us-txt"><b>超声所见：</b>\n${esc(u.findings)}</div>` +
       `<div class="us-txt"><b>超声结论：</b>\n${esc(u.conclusion)}</div></div></details>`;
@@ -190,32 +237,98 @@ async function loadData() {
     if (!j.ok) throw new Error(j.error || "加载失败");
     renderAll(j);
   } catch (e) {
-    showStatus("加载数据失败：" + e.message, "error");
+    // 网络抖动常见：给出可点的重试入口，不用整页刷新
+    const el = $("status");
+    el.hidden = false;
+    el.className = "status error";
+    el.innerHTML = "";
+    el.append("加载数据失败：" + e.message + "（多为网络波动） ");
+    const retry = document.createElement("button");
+    retry.className = "retry-btn";
+    retry.textContent = "点我重试";
+    retry.addEventListener("click", () => loadData());
+    el.appendChild(retry);
   }
 }
 
 $("btn-refresh").addEventListener("click", async () => {
   const btn = $("btn-refresh");
+  const prog = $("progress"), pText = $("prog-text"), pLog = $("prog-log"), pBar = $("prog-bar"), pTime = $("prog-time");
   btn.disabled = true;
-  btn.innerHTML = '<span class="spin">⏳</span> 正在抓取医院数据…';
-  showStatus("正在连接医院查询系统，请稍候（约需 10-30 秒）…");
+  btn.innerHTML = '<span class="spin">⏳</span> 正在抓取…';
+  prog.hidden = false;
+  pLog.innerHTML = "";
+  pBar.style.width = "0%";
+  const t0 = Date.now();
+  const tick = setInterval(() => { pTime.textContent = Math.round((Date.now() - t0) / 1000) + "s"; }, 500);
+  const logLine = (html) => {
+    const div = document.createElement("div");
+    div.innerHTML = html;
+    pLog.appendChild(div);
+    if (pLog.scrollTo) pLog.scrollTop = pLog.scrollHeight;
+  };
   try {
-    // 新报告较多时分批抓取（服务端每轮最多 40 份详情），自动连抓直到抓完
+    // 分批抓取：每轮 8 份（服务端上限 40），抓到多少显示多少，边抓边看
     const acc = { new_lab_count: 0, new_us_count: 0, new_labs: [], new_us: [], failed_details: [], latest: null };
-    for (let round = 0; round < 5; round++) {
-      const r = await fetch("/api/refresh", { method: "POST" });
-      if (r.status === 401) { needLogin(); return; }
-      const j = await r.json();
+    let totalNew = null;
+    let lastHasMore = false;
+    for (let round = 1; round <= 12; round++) {
+      pText.textContent = round === 1 ? "正在连接医院查询系统，获取报告列表…" : `第 ${round} 轮：继续抓取报告明细…`;
+      // 网络不稳自动重试：服务端按"已入库"去重，重复请求无副作用
+      let j = null;
+      let lastErr = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const r = await fetch("/api/refresh?limit=8", { method: "POST" });
+          if (r.status === 401) { needLogin(); return; }
+          j = await r.json();
+          if (!j.ok && String(j.error || "").includes("结构")) throw new FatalErr(j.error || "医院页面结构变化");
+          break;
+        } catch (e) {
+          lastErr = e;
+          j = null;
+          if (e instanceof FatalErr) throw e;
+          if (attempt < 3) {
+            pText.textContent = `网络不稳定，3 秒后自动重试（第 ${attempt}/3 次）…`;
+            await new Promise((res) => setTimeout(res, 3000));
+          }
+        }
+      }
+      if (!j) throw lastErr || new Error("刷新失败");
       if (!j.ok) throw new Error(j.error || "刷新失败");
+      lastHasMore = !!j.has_more;
+      if (totalNew === null && typeof j.pending_count === "number" && j.pending_count > 0) {
+        totalNew = j.pending_count;
+        logLine(`发现 <b>${totalNew}</b> 份新检验报告，开始抓取明细`);
+      }
+      if (j.new_us_count) logLine(`<span class="ok">＋ 新增超声报告 ${j.new_us_count} 份</span>`);
+      for (const nl of j.new_labs || []) {
+        const ab = nl.abnormal.length ? `，<span class="warn">${nl.abnormal.length} 项异常</span>` : "";
+        logLine(`<span class="ok">＋ ${esc(nl.project)}</span>（${esc(String(nl.audit_time || "").replace(/\s+/g, " "))}）${ab}`);
+      }
+      for (const f of j.failed_details || []) logLine(`<span class="warn">✗ ${esc(f.project)} 明细抓取失败，下次自动重试</span>`);
       acc.new_lab_count += j.new_lab_count || 0;
       acc.new_us_count += j.new_us_count || 0;
       acc.new_labs.push(...(j.new_labs || []));
       acc.new_us.push(...(j.new_us || []));
       acc.failed_details.push(...(j.failed_details || []));
       acc.latest = j.latest || acc.latest;
+      if (totalNew) pBar.style.width = Math.min(100, Math.round((acc.new_lab_count / totalNew) * 100)) + "%";
+      pText.textContent = totalNew
+        ? `已入库 ${acc.new_lab_count} / ${totalNew} 份检验报告…`
+        : `已入库 ${acc.new_lab_count} 份检验报告…`;
+      loadData().catch(() => {}); // 增量渲染：抓到的立刻上屏
       if (!j.has_more) break;
-      showStatus(`报告较多，正在分批抓取（已入库 ${acc.new_lab_count} 份）…`);
     }
+    clearInterval(tick);
+    pBar.style.width = "100%";
+    pText.textContent = "抓取完成";
+    // 记住本次新增，用于页面上"新"标记（会话内有效）
+    try {
+      sessionStorage.setItem("hc_new_lab_ids", JSON.stringify(acc.new_labs.map((n) => n.id)));
+      sessionStorage.setItem("hc_new_us_ids", JSON.stringify(acc.new_us.map((u) => u.report_time)));
+    } catch {}
+
     const lines = [];
     if (acc.new_lab_count === 0 && acc.new_us_count === 0) {
       lines.push("本次无新增报告，当前数据已是最新。");
@@ -226,6 +339,7 @@ $("btn-refresh").addEventListener("click", async () => {
       }
       if (acc.new_us_count) lines.push(`新增超声报告 ${acc.new_us_count} 份`);
     }
+    if (lastHasMore) lines.push("", "⚠️ 报告较多，一次没抓完，再点一次按钮继续。");
     if (acc.failed_details.length) {
       lines.push("", `⚠️ ${acc.failed_details.length} 份报告明细抓取失败，下次刷新会自动重试：`);
       for (const f of acc.failed_details) lines.push(`· ${f.project}（${f.audit_time}）`);
@@ -234,11 +348,14 @@ $("btn-refresh").addEventListener("click", async () => {
       lines.push("", "关键指标最新值：");
       for (const [k, v] of Object.entries(acc.latest)) lines.push(`· ${k}: ${v.value} ${v.flag || ""}（${v.date}）`);
     }
-    showStatus(lines.join("\n"), acc.failed_details.length ? "" : "success");
+    showStatus(lines.join("\n"), acc.failed_details.length || lastHasMore ? "" : "success");
     await loadData();
+    setTimeout(() => { prog.hidden = true; }, 2500);
   } catch (e) {
-    showStatus("刷新失败：" + e.message, "error");
+    clearInterval(tick);
+    showStatus("刷新失败：" + e.message + "\n已入库的报告不会丢，点上面按钮重试会从断点继续。", "error");
   } finally {
+    clearInterval(tick);
     btn.disabled = false;
     btn.innerHTML = "🔄 获取最新报告";
   }

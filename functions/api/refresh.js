@@ -24,6 +24,12 @@ export async function onRequestPost(context) {
   const base = env.HOSPITAL_BASE || DEFAULT_BASE;
   // 免费版单次请求子请求上限 50，预留余量，单次最多抓 40 份新详情（剩余的下轮继续）
   const MAX_DETAILS_PER_RUN = 40;
+  // ?limit=N：客户端分批抓取（小批量多轮，便于前端展示实时进度），默认 40
+  let limit = MAX_DETAILS_PER_RUN;
+  try {
+    const q = parseInt(new URL(context.request.url).searchParams.get("limit") || "", 10);
+    if (Number.isFinite(q)) limit = Math.min(Math.max(q, 1), MAX_DETAILS_PER_RUN);
+  } catch {}
 
   try {
     const { labList, usList, structureSuspect } = await scrapeAll(base, pid);
@@ -44,7 +50,7 @@ export async function onRequestPost(context) {
 
     // 增量抓取检验详情（新的在前，先抓最新的；超限部分下轮继续）
     const pending = labList.filter((e) => !existing.has(e.id));
-    const batch = pending.slice(0, MAX_DETAILS_PER_RUN);
+    const batch = pending.slice(0, limit);
     const hasMore = pending.length > batch.length;
     const newLabs = [];
     const failedDetails = [];
@@ -119,6 +125,7 @@ export async function onRequestPost(context) {
       ok: true,
       new_lab_count: newLabs.length,
       new_us_count: newUs.length,
+      pending_count: pending.length,
       has_more: hasMore,
       failed_details: failedDetails,
       new_labs: newLabs.map((r) => ({
