@@ -50,7 +50,7 @@ Dashboard → **Storage & Databases → D1 SQL Database → Create database**，
 
 ### 2. 部署到 Pages
 
-**Workers & Pages → Create → Pages → Connect to Git**，选择本仓库，构建配置保持默认（`wrangler.toml` 已指定输出目录 `public`，无需填写构建命令），保存并部署。
+**Workers & Pages → Create → Pages → Connect to Git**，选择本仓库。构建设置：**Framework preset 选 None，Build command 留空，Build output directory 填 `public`**，保存并部署。
 
 ### 3. 绑定 D1 与配置环境变量
 
@@ -68,8 +68,8 @@ Dashboard → **Storage & Databases → D1 SQL Database → Create database**，
 | `LLM_API_KEY` | 可选 | 大模型 API Key（不配则前端不显示 AI 按钮） |
 | `LLM_MODEL` | 可选 | 模型名，默认 `gpt-4o-mini` |
 
-> 不要把 `database_id` 写进 `wrangler.toml` 或仓库任何位置——那是各账号私有的，
-> 写了占位符会导致 Git 集成部署报 `Error 8000022: Invalid database UUID`。绑定一律走控制台 Bindings。
+> 本仓库**不含 `wrangler.toml`**：Pages 项目一旦检测到该文件，绑定（Bindings）就会被锁定为只能通过文件管理。
+> 为保证 fork 后全程可在控制台操作，D1 绑定一律走 Settings → Bindings，环境变量走 Settings → Environment variables。
 
 配好后 **重新部署一次**（Deployments → 最新一条 → Retry deployment）让绑定与变量生效。
 
@@ -128,8 +128,7 @@ node test/render.test.mjs   # 前端渲染逻辑
 │       ├── data.js       # GET  /api/data    全量读取
 │       └── analyze.js    # POST /api/analyze 可选 AI 解读
 ├── schema.sql         # D1 建表语句
-├── test/smoke.test.mjs# 解析逻辑冒烟测试
-└── wrangler.toml      # Pages + D1 配置
+└── test/smoke.test.mjs# 解析逻辑冒烟测试
 ```
 
 ## License
