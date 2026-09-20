@@ -41,35 +41,23 @@ Cloudflare D1（SQLite）：lab_reports / us_reports / meta
 
 ## 部署（约 10 分钟）
 
-前置：一个 Cloudflare 账号、Node.js 18+。
+全程在 Cloudflare 控制台完成，无需安装任何工具。
 
-### 1. 克隆并创建 D1
+### 1. 创建 D1 数据库并建表
 
-```bash
-git clone https://github.com/<你的用户名>/hongci-report-tracker.git
-cd hongci-report-tracker
-npx wrangler login
-npx wrangler d1 create hongci-reports
-```
-
-把输出的 `database_id` 填入 `wrangler.toml` 中对应位置，然后建表：
-
-```bash
-npx wrangler d1 execute hongci-reports --file=schema.sql
-```
+Dashboard → **Storage & Databases → D1 SQL Database → Create database**，命名 `hongci-reports`。
+进入数据库 → **Console** 标签 → 把 `schema.sql` 全部内容粘贴进去 → **Execute**（建出 `lab_reports` / `us_reports` / `meta` 三张表）。
 
 ### 2. 部署到 Pages
 
-```bash
-npx wrangler pages deploy public --project-name=hongci-report-tracker
-```
+**Workers & Pages → Create → Pages → Connect to Git**，选择本仓库，构建配置保持默认（`wrangler.toml` 已指定输出目录 `public`，无需填写构建命令），保存并部署。
 
-> 首次执行会提示创建 Pages 项目，确认即可。Functions 会随项目一起部署。
-> 也可以用 Git 集成：在 Pages 控制台连接 GitHub 仓库，构建命令留空、输出目录填 `public`。
+### 3. 绑定 D1 与配置环境变量
 
-### 3. 配置环境变量
+进入 Pages 项目 → **Settings**：
 
-Pages 控制台 → 你的项目 → **Settings → Environment variables**（Production 和 Preview 都要配）：
+- **Bindings → Add → D1 database**：**变量名必须填 `DB`**（代码中为 `env.DB`），选中第 1 步创建的数据库。Production 和 Preview 都要绑。
+- **Environment variables**（Production 和 Preview 都要配）：
 
 | 变量 | 必填 | 说明 |
 |---|---|---|
@@ -80,7 +68,10 @@ Pages 控制台 → 你的项目 → **Settings → Environment variables**（Pr
 | `LLM_API_KEY` | 可选 | 大模型 API Key（不配则前端不显示 AI 按钮） |
 | `LLM_MODEL` | 可选 | 模型名，默认 `gpt-4o-mini` |
 
-配好后 **重新部署一次**（或触发一次新的 deployment）让变量生效。
+> 不要把 `database_id` 写进 `wrangler.toml` 或仓库任何位置——那是各账号私有的，
+> 写了占位符会导致 Git 集成部署报 `Error 8000022: Invalid database UUID`。绑定一律走控制台 Bindings。
+
+配好后 **重新部署一次**（Deployments → 最新一条 → Retry deployment）让绑定与变量生效。
 
 ### 4. 使用
 
