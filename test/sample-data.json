@@ -1,0 +1,67 @@
+{
+  "ok": true,
+  "patient": { "name": "张三", "gender": "男", "age": "48", "bed": "942", "dept": "九病区血液科" },
+  "last_refresh": "2026-09-20T10:30:00.000Z",
+  "ai_enabled": false,
+  "lab_reports": [
+    {
+      "id": "20260920LJA0024",
+      "audit_time": "2026/9/20 8:43:20",
+      "project": "血常规",
+      "reviewer": "1731",
+      "items": [
+        { "name": "白细胞", "result": "1.26", "flag": "↓", "ref_lo": "4.00", "ref_hi": "10.00", "ref_text": "4~10" },
+        { "name": "红细胞", "result": "2.78", "flag": "↓", "ref_lo": "3.50", "ref_hi": "5.50", "ref_text": "3.5~5.5" },
+        { "name": "血红蛋白", "result": "91", "flag": "↓", "ref_lo": "120", "ref_hi": "160", "ref_text": "120~160" },
+        { "name": "血小板计数", "result": "51", "flag": "↓", "ref_lo": "100", "ref_hi": "300", "ref_text": "100~300" },
+        { "name": "中性粒细胞数", "result": "1.08", "flag": "↓", "ref_lo": "2.00", "ref_hi": "7.70", "ref_text": "2~7.7" },
+        { "name": "淋巴细胞比率", "result": "6.70", "flag": "↓", "ref_lo": "20.00", "ref_hi": "40.00", "ref_text": "20~40" },
+        { "name": "平均血红蛋白含量", "result": "32.9", "flag": "↑", "ref_lo": "26.0", "ref_hi": "32.0", "ref_text": "26~32" }
+      ]
+    },
+    {
+      "id": "20260919LJK0040",
+      "audit_time": "2026/9/19 8:55:20",
+      "project": "血常规",
+      "reviewer": "1722",
+      "items": [
+        { "name": "白细胞", "result": "3.64", "flag": "↓", "ref_lo": "4.00", "ref_hi": "10.00", "ref_text": "4~10" },
+        { "name": "血红蛋白", "result": "101", "flag": "↓", "ref_lo": "120", "ref_hi": "160", "ref_text": "120~160" },
+        { "name": "血小板计数", "result": "70", "flag": "↓", "ref_lo": "100", "ref_hi": "300", "ref_text": "100~300" },
+        { "name": "中性粒细胞数", "result": "3.36", "flag": "", "ref_lo": "2.00", "ref_hi": "7.70", "ref_text": "2~7.7" }
+      ]
+    },
+    {
+      "id": "20260918LJK0037",
+      "audit_time": "2026/9/18 8:36:53",
+      "project": "血常规",
+      "reviewer": "1724",
+      "items": [
+        { "name": "白细胞", "result": "1.58", "flag": "↓", "ref_lo": "4.00", "ref_hi": "10.00", "ref_text": "4~10" },
+        { "name": "血红蛋白", "result": "99", "flag": "↓", "ref_lo": "120", "ref_hi": "160", "ref_text": "120~160" },
+        { "name": "血小板计数", "result": "69", "flag": "↓", "ref_lo": "100", "ref_hi": "300", "ref_text": "100~300" },
+        { "name": "中性粒细胞数", "result": "1.28", "flag": "↓", "ref_lo": "2.00", "ref_hi": "7.70", "ref_text": "2~7.7" }
+      ]
+    },
+    {
+      "id": "20260917SHA0001",
+      "audit_time": "2026/9/17 9:08:58",
+      "project": "C-反应蛋白测定(CRP)+肾功能",
+      "reviewer": "1706",
+      "items": [
+        { "name": "C-反应蛋白", "result": "6.9", "flag": "", "ref_lo": "0", "ref_hi": "8", "ref_text": "0~8" },
+        { "name": "肌酐", "result": "58", "flag": "", "ref_lo": "44", "ref_hi": "97", "ref_text": "44~97" }
+      ]
+    }
+  ],
+  "us_reports": [
+    {
+      "uid": "USdemo0001",
+      "report_time": "2026/9/15 8:18:23",
+      "dept": "九病区血液科",
+      "doctor": "王医生",
+      "findings": "左侧颈部可见多个淋巴结回声，较大一个约28×11mm，边界清晰。",
+      "conclusion": "左侧颈部淋巴结肿大，请结合临床。"
+    }
+  ]
+}
