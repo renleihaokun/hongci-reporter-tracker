@@ -76,14 +76,14 @@ check(trendHtml.includes("↓偏低"), "异常标记");
   const wbcCard = els["trends"].children[0].innerHTML;
   const circles = (wbcCard.match(/<circle/g) || []).length;
   check(circles === 3, "白细胞趋势仅3个血常规点(尿沉渣已排除," + circles + "点)");
-  check(wbcCard.includes(">1.26<"), "白细胞最新值=血常规1.26(非尿沉渣45.2)");
+  check(wbcCard.includes(">2.1<"), "白细胞最新值=血常规2.1(非尿沉渣88.0)");
   check(wbcCard.includes("参考 4~10"), "白细胞参考带=血常规4~10(非尿沉渣0~25)");
-  check(!wbcCard.includes("45.2") && !wbcCard.includes("0~25"), "尿沉渣数值/参考带未混入白细胞卡");
+  check(!wbcCard.includes("88.0") && !wbcCard.includes("0~25"), "尿沉渣数值/参考带未混入白细胞卡");
 }
 const labsHtml = els["labs"].children.map((c) => c.innerHTML).join("");
 check(labsHtml.includes("血常规"), "检验报告渲染");
 check(labsHtml.includes("尿沉渣"), "尿沉渣报告正常展示在检验列表(只是不进趋势)");
-check(labsHtml.includes("1.26"), "检验数值渲染");
+check(labsHtml.includes("2.10"), "检验数值渲染");
 check(labsHtml.includes("类=\"abn\"") || labsHtml.includes('class="abn"'), "异常行高亮");
 const usHtml = els["uss"].children.map((c) => c.innerHTML).join("");
 check(usHtml.includes("左侧颈部淋巴结肿大"), "超声结论渲染");
@@ -96,12 +96,12 @@ check(els["us-title"].hidden === false, "超声标题显示");
   else {
     const p = build(sample, new Date(2026, 8, 21).getTime());
     check(p.includes("白细胞 (WBC)"), "提示词含关键指标段落");
-    check(p.includes("1.26"), "提示词含最新白细胞值");
+    check(p.includes("2.10"), "提示词含最新白细胞值");
     // 尿沉渣值只允许出现在"异常项目"段（带类型前缀），不得混入指标序列段
     const seriesSec = (p.split("【近14天关键指标】")[1] || "").split("【最近一天异常项目】")[0];
-    check(seriesSec.includes("1.26") && !seriesSec.includes("45.2"), "尿沉渣值不进指标序列段");
+    check(seriesSec.includes("2.10") && !seriesSec.includes("88.0"), "尿沉渣值不进指标序列段");
     check(p.includes("尿沉渣·白细胞"), "异常项带报告类型前缀(防AI误读为血象)");
-    check(p.split("45.2").length - 1 === 1, "尿沉渣数值仅作为异常项出现一次");
+    check(p.split("88.0").length - 1 === 1, "尿沉渣数值仅作为异常项出现一次");
     check(p.includes("请以主治医生解读为准"), "提示词含免责约束");
     check(!/姓名|住院号|张三/.test(p), "提示词不含隐私字段");
   }

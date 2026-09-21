@@ -9,13 +9,13 @@
       "project": "血常规",
       "reviewer": "1731",
       "items": [
-        { "name": "白细胞", "result": "1.26", "flag": "↓", "ref_lo": "4.00", "ref_hi": "10.00", "ref_text": "4~10" },
-        { "name": "红细胞", "result": "2.78", "flag": "↓", "ref_lo": "3.50", "ref_hi": "5.50", "ref_text": "3.5~5.5" },
-        { "name": "血红蛋白", "result": "91", "flag": "↓", "ref_lo": "120", "ref_hi": "160", "ref_text": "120~160" },
-        { "name": "血小板计数", "result": "51", "flag": "↓", "ref_lo": "100", "ref_hi": "300", "ref_text": "100~300" },
-        { "name": "中性粒细胞数", "result": "1.08", "flag": "↓", "ref_lo": "2.00", "ref_hi": "7.70", "ref_text": "2~7.7" },
-        { "name": "淋巴细胞比率", "result": "6.70", "flag": "↓", "ref_lo": "20.00", "ref_hi": "40.00", "ref_text": "20~40" },
-        { "name": "平均血红蛋白含量", "result": "32.9", "flag": "↑", "ref_lo": "26.0", "ref_hi": "32.0", "ref_text": "26~32" }
+        { "name": "白细胞", "result": "2.10", "flag": "↓", "ref_lo": "4.00", "ref_hi": "10.00", "ref_text": "4~10" },
+        { "name": "红细胞", "result": "2.88", "flag": "↓", "ref_lo": "3.50", "ref_hi": "5.50", "ref_text": "3.5~5.5" },
+        { "name": "血红蛋白", "result": "88", "flag": "↓", "ref_lo": "120", "ref_hi": "160", "ref_text": "120~160" },
+        { "name": "血小板计数", "result": "58", "flag": "↓", "ref_lo": "100", "ref_hi": "300", "ref_text": "100~300" },
+        { "name": "中性粒细胞数", "result": "1.18", "flag": "↓", "ref_lo": "2.00", "ref_hi": "7.70", "ref_text": "2~7.7" },
+        { "name": "淋巴细胞比率", "result": "8.80", "flag": "↓", "ref_lo": "20.00", "ref_hi": "40.00", "ref_text": "20~40" },
+        { "name": "平均血红蛋白含量", "result": "33.2", "flag": "↑", "ref_lo": "26.0", "ref_hi": "32.0", "ref_text": "26~32" }
       ]
     },
     {
@@ -24,7 +24,7 @@
       "project": "尿沉渣",
       "reviewer": "1732",
       "items": [
-        { "name": "白细胞", "result": "45.2", "flag": "↑", "ref_lo": "0", "ref_hi": "25", "ref_text": "0~25" },
+        { "name": "白细胞", "result": "88.0", "flag": "↑", "ref_lo": "0", "ref_hi": "25", "ref_text": "0~25" },
         { "name": "白细胞团", "result": "1.8", "flag": "", "ref_lo": "0", "ref_hi": "5", "ref_text": "0~5" },
         { "name": "红细胞总数", "result": "5.8", "flag": "", "ref_lo": "0", "ref_hi": "15", "ref_text": "0~15" },
         { "name": "细菌", "result": "63.5", "flag": "", "ref_lo": "0", "ref_hi": "130", "ref_text": "0~130" },
@@ -37,9 +37,9 @@
       "project": "血常规",
       "reviewer": "1722",
       "items": [
-        { "name": "白细胞", "result": "3.64", "flag": "↓", "ref_lo": "4.00", "ref_hi": "10.00", "ref_text": "4~10" },
-        { "name": "血红蛋白", "result": "101", "flag": "↓", "ref_lo": "120", "ref_hi": "160", "ref_text": "120~160" },
-        { "name": "血小板计数", "result": "70", "flag": "↓", "ref_lo": "100", "ref_hi": "300", "ref_text": "100~300" },
+        { "name": "白细胞", "result": "3.20", "flag": "↓", "ref_lo": "4.00", "ref_hi": "10.00", "ref_text": "4~10" },
+        { "name": "血红蛋白", "result": "95", "flag": "↓", "ref_lo": "120", "ref_hi": "160", "ref_text": "120~160" },
+        { "name": "血小板计数", "result": "72", "flag": "↓", "ref_lo": "100", "ref_hi": "300", "ref_text": "100~300" },
         { "name": "中性粒细胞数", "result": "3.36", "flag": "", "ref_lo": "2.00", "ref_hi": "7.70", "ref_text": "2~7.7" }
       ]
     },
@@ -49,10 +49,10 @@
       "project": "血常规",
       "reviewer": "1724",
       "items": [
-        { "name": "白细胞", "result": "1.58", "flag": "↓", "ref_lo": "4.00", "ref_hi": "10.00", "ref_text": "4~10" },
-        { "name": "血红蛋白", "result": "99", "flag": "↓", "ref_lo": "120", "ref_hi": "160", "ref_text": "120~160" },
-        { "name": "血小板计数", "result": "69", "flag": "↓", "ref_lo": "100", "ref_hi": "300", "ref_text": "100~300" },
-        { "name": "中性粒细胞数", "result": "1.28", "flag": "↓", "ref_lo": "2.00", "ref_hi": "7.70", "ref_text": "2~7.7" }
+        { "name": "白细胞", "result": "2.90", "flag": "↓", "ref_lo": "4.00", "ref_hi": "10.00", "ref_text": "4~10" },
+        { "name": "血红蛋白", "result": "93", "flag": "↓", "ref_lo": "120", "ref_hi": "160", "ref_text": "120~160" },
+        { "name": "血小板计数", "result": "65", "flag": "↓", "ref_lo": "100", "ref_hi": "300", "ref_text": "100~300" },
+        { "name": "中性粒细胞数", "result": "1.38", "flag": "↓", "ref_lo": "2.00", "ref_hi": "7.70", "ref_text": "2~7.7" }
       ]
     },
     {
