@@ -36,7 +36,7 @@
 
   <div class="actions">
     <button id="btn-refresh" class="btn btn-primary">🔄 获取最新报告</button>
-    <button id="btn-ai" class="btn btn-secondary" hidden>🤖 AI 解读</button>
+    <button id="btn-ai" class="btn btn-secondary">🤖 AI 解读</button>
   </div>
 
   <div id="progress" class="card progress" hidden>
@@ -52,8 +52,22 @@
   <div id="status" class="status" hidden></div>
 
   <div id="ai-box" class="card ai-box" hidden>
-    <div class="ai-title">🤖 AI 家属版解读 <span class="ai-model" id="ai-model"></span></div>
-    <div id="ai-text" class="ai-text"></div>
+    <div class="ai-title">🤖 AI 解读指引 <span class="ai-badge">免费 · 无需配置 API</span></div>
+    <ol class="ai-steps">
+      <li><b>复制提示词</b>：点顶部「🤖 AI 解读」已自动复制，也可点下方按钮重新复制</li>
+      <li><b>打开 DeepSeek</b>：点下方按钮直达网页版，手机上用 DeepSeek App 也行</li>
+      <li><b>粘贴发送</b>：建议开启「深度思考 R1」，解读更细致</li>
+    </ol>
+    <div class="ai-actions">
+      <button id="ai-copy" class="ai-btn">📋 复制提示词</button>
+      <a class="ai-btn ai-btn-ds" href="https://chat.deepseek.com" target="_blank" rel="noopener">DeepSeek 网页版 ↗</a>
+    </div>
+    <div id="ai-status" class="ai-status" hidden></div>
+    <details class="ai-fold">
+      <summary><span>查看 / 手动复制完整提示词</span><span class="arrow">▶</span></summary>
+      <pre id="ai-text" class="ai-text" tabindex="0"></pre>
+    </details>
+    <div class="ai-note">提示词仅含检验数值与报告类型，不含姓名、住院号；粘贴给 DeepSeek 即表示你同意其处理这些数据。</div>
   </div>
 
   <h2>关键指标趋势</h2>

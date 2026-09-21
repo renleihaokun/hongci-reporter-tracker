@@ -2,7 +2,6 @@
   "ok": true,
   "patient": { "name": "张三", "gender": "男", "age": "48", "bed": "942", "dept": "九病区血液科" },
   "last_refresh": "2026-09-20T10:30:00.000Z",
-  "ai_enabled": false,
   "lab_reports": [
     {
       "id": "20260920LJA0024",

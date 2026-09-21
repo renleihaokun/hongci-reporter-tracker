@@ -22,7 +22,6 @@ function loadData() {
       ok: true,
       patient: d.patient || {},
       last_refresh: new Date().toISOString(),
-      ai_enabled: false,
       lab_reports: Object.values(d.lab_reports || {}),
       us_reports: Object.values(d.us_reports || {}),
     };
@@ -42,11 +41,6 @@ createServer((req, res) => {
   if (url.pathname === "/api/refresh") {
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ ok: true, new_lab_count: 0, new_us_count: 0, new_labs: [], new_us: [], latest: {}, refreshed_at: new Date().toISOString() }));
-    return;
-  }
-  if (url.pathname === "/api/analyze") {
-    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ ok: true, enabled: false, message: "本地预览未配置大模型" }));
     return;
   }
   const path = join(ROOT, "public", url.pathname === "/" ? "index.html" : url.pathname);

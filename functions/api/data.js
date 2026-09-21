@@ -1,4 +1,4 @@
-/** GET /api/data — 返回全部归档数据供前端渲染 */
+/** GET /api/data — 返回全部归档数据供前端渲染（AI 提示词由前端本地构建，服务端不依赖 LLM） */
 function parseDt(s) {
   const m = /(\d{4})[\/.](\d{1,2})[\/.](\d{1,2})\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?/.exec(s || "");
   if (!m) return 0;
@@ -28,7 +28,6 @@ export async function onRequestGet(context) {
       ok: true,
       patient: JSON.parse(metaMap.patient_json || "{}"),
       last_refresh: metaMap.last_refresh || null,
-      ai_enabled: Boolean(env.LLM_BASE_URL && env.LLM_API_KEY),
       auth_required: Boolean(env.ACCESS_PASSWORD),
       lab_reports: labReports,
       us_reports: usReports,

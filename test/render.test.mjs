@@ -22,7 +22,7 @@ function makeEl(id) {
 }
 const els = {};
 for (const id of [
-  "patient-title", "patient-sub", "btn-refresh", "btn-ai", "btn-logout", "status", "ai-box", "ai-model", "ai-text",
+  "patient-title", "patient-sub", "btn-refresh", "btn-ai", "btn-logout", "status", "ai-box", "ai-text", "ai-status", "ai-copy",
   "trends", "trends-empty", "labs", "uss", "us-title",
   "hero", "hero-name", "hero-tags", "hero-meta", "hero-range", "hero-updated",
   "stat-labs", "stat-us", "stat-abn", "stat-days",
@@ -33,7 +33,13 @@ for (const id of [
 globalThis.document = {
   getElementById: (id) => els[id] ?? null,
   createElement: () => makeEl("dynamic"),
+  body: { appendChild() {}, removeChild() {} },
 };
+Object.defineProperty(globalThis, "navigator", {
+  value: { clipboard: { writeText: async () => {} } },
+  configurable: true,
+  writable: true,
+});
 globalThis.fetch = async (url) => ({
   json: async () => {
     if (url === "/api/data") return sample;
@@ -52,7 +58,7 @@ const check = (cond, msg) => { console.log((cond ? "ok: " : "FAIL: ") + msg); if
 
 check(els["patient-title"].textContent.includes("张三"), "标题渲染患者名");
 check(els["patient-sub"].textContent.includes("床位 942"), "副标题渲染床位");
-check(els["btn-ai"].hidden === true, "未配置AI时按钮隐藏");
+check(els["btn-ai"].hidden === false, "AI解读按钮常显(无需配置API)");
 check(els["hero"].hidden === false, "汇总卡显示");
 check(els["hero-name"].textContent.includes("张三"), "汇总卡渲染患者名");
 check(els["stat-labs"].textContent === "5", "统计:检验5份(含尿沉渣)");
@@ -82,6 +88,24 @@ check(labsHtml.includes("类=\"abn\"") || labsHtml.includes('class="abn"'), "异
 const usHtml = els["uss"].children.map((c) => c.innerHTML).join("");
 check(usHtml.includes("左侧颈部淋巴结肿大"), "超声结论渲染");
 check(els["us-title"].hidden === false, "超声标题显示");
+
+// ---- AI 提示词构建（免 API 方案）----
+{
+  const build = globalThis.__buildAiPrompt;
+  if (typeof build !== "function") { console.log("FAIL: buildAiPrompt 未暴露"); fail++; }
+  else {
+    const p = build(sample, new Date(2026, 8, 21).getTime());
+    check(p.includes("白细胞 (WBC)"), "提示词含关键指标段落");
+    check(p.includes("1.26"), "提示词含最新白细胞值");
+    // 尿沉渣值只允许出现在"异常项目"段（带类型前缀），不得混入指标序列段
+    const seriesSec = (p.split("【近14天关键指标】")[1] || "").split("【最近一天异常项目】")[0];
+    check(seriesSec.includes("1.26") && !seriesSec.includes("45.2"), "尿沉渣值不进指标序列段");
+    check(p.includes("尿沉渣·白细胞"), "异常项带报告类型前缀(防AI误读为血象)");
+    check(p.split("45.2").length - 1 === 1, "尿沉渣数值仅作为异常项出现一次");
+    check(p.includes("请以主治医生解读为准"), "提示词含免责约束");
+    check(!/姓名|住院号|张三/.test(p), "提示词不含隐私字段");
+  }
+}
 
 // ---- 边界场景：长期归档大数据量 + 空明细报告 ----
 {

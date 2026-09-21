@@ -110,6 +110,9 @@ function svgChart(allPoints, ref) {
   return s + "</svg>";
 }
 
+/* 最近一次 /api/data 的全量数据（AI 提示词在本地构建，无需再请求服务端） */
+let currentData = null;
+
 /* ---------- 渲染 ---------- */
 function renderAll(data) {
   const p = data.patient || {};
@@ -117,7 +120,6 @@ function renderAll(data) {
   $("patient-title").textContent = p.name ? `${p.name} 的住院报告` : "住院报告追踪";
   const bits = [p.gender, p.age && p.age + "岁", p.bed && "床位 " + p.bed, p.dept].filter(Boolean).join(" · ");
   $("patient-sub").textContent = (bits ? bits + " · " : "") + "上次更新 " + upd;
-  $("btn-ai").hidden = !data.ai_enabled;
   $("btn-logout").hidden = !data.auth_required;
 
   const labs = (data.lab_reports || []).slice().sort((a, b) => parseDt(a.audit_time) - parseDt(b.audit_time));
@@ -245,6 +247,7 @@ async function loadData() {
     if (r.status === 401) { needLogin(); return; }
     const j = await r.json();
     if (!j.ok) throw new Error(j.error || "加载失败");
+    currentData = j;
     renderAll(j);
   } catch (e) {
     // 网络抖动常见：给出可点的重试入口，不用整页刷新
@@ -371,25 +374,85 @@ $("btn-refresh").addEventListener("click", async () => {
   }
 });
 
-$("btn-ai").addEventListener("click", async () => {
-  const btn = $("btn-ai");
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spin">⏳</span> AI 分析中…';
-  try {
-    const r = await fetch("/api/analyze", { method: "POST" });
-    if (r.status === 401) { needLogin(); return; }
-    const j = await r.json();
-    if (!j.ok) throw new Error(j.error || "分析失败");
-    if (!j.enabled) { showStatus(j.message || "未配置大模型", "error"); return; }
-    $("ai-box").hidden = false;
-    $("ai-model").textContent = j.model ? "· " + j.model : "";
-    $("ai-text").textContent = j.analysis;
-  } catch (e) {
-    showStatus("AI 分析失败：" + e.message, "error");
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = "🤖 AI 解读";
+/* ---------- AI 解读（免 API 方案）----------
+ * 前端已持有 /api/data 全量数据，本地构建提示词并复制到剪贴板，
+ * 引导家属去 DeepSeek 网页版/App 粘贴分析，服务端零 LLM 依赖。 */
+function buildAiPrompt(data, nowMs = Date.now()) {
+  const labs = (data.lab_reports || [])
+    .slice()
+    .sort((a, b) => parseDt(a.audit_time) - parseDt(b.audit_time));
+  const recent = labs.filter((r) => parseDt(r.audit_time) > nowMs - 14 * 864e5);
+  const series = TREND_DEFS.map(([label, match]) => {
+    const vals = [];
+    for (const rep of recent) {
+      for (const it of rep.items || []) {
+        if (match(rep, it) && !Number.isNaN(parseFloat(it.result))) {
+          vals.push(`${mmdd(rep.audit_time)}=${it.result}${it.flag || ""}`);
+        }
+      }
+    }
+    return `${label}: ${vals.join(" → ") || "无数据"}`;
+  });
+  const lastDay = Math.max(0, ...labs.map((r) => parseDt(r.audit_time)));
+  const abn = [];
+  for (const rep of labs.filter((r) => parseDt(r.audit_time) >= lastDay - 864e5)) {
+    for (const it of rep.items || []) {
+      if (it.flag === "↑" || it.flag === "↓") {
+        abn.push(`${rep.project}·${it.name}=${it.result}${it.flag}(参考${it.ref_text || "-"})`);
+      }
+    }
   }
+  return (
+    "你是住院患者家属的贴心助手。根据下面的检验数据，用通俗、温和的简体中文向非医学专业的家属说明情况。\n" +
+    "要求：1) 只客观描述数值变化和含义，不做诊断、不预测病情、不给出治疗建议；" +
+    "2) 指出哪些指标需要向医生询问；3) 结尾必须写\"以上仅供参考，请以主治医生解读为准\"；" +
+    "4) 控制在250字以内，分3-4个短段落。\n\n" +
+    "【近14天关键指标】\n" + series.join("\n") +
+    "\n\n【最近一天异常项目】\n" + (abn.slice(0, 40).join("\n") || "无")
+  );
+}
+
+/* 剪贴板：新式 API 优先，老 webview（如微信内置浏览器）降级 execCommand，
+ * 仍失败时指引卡会展示全文供长按手动复制（页面另有 user-select:all 兜底） */
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {}
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.cssText = "position:fixed;top:-999px;opacity:0";
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch {}
+  ta.remove();
+  return ok;
+}
+
+function setAiStatus(copied) {
+  const st = $("ai-status");
+  st.hidden = false;
+  st.className = "ai-status " + (copied ? "ok" : "warn");
+  st.textContent = copied
+    ? "✓ 分析提示词已复制，去 DeepSeek 粘贴发送即可"
+    : "⚠ 自动复制被浏览器拒绝：展开下方提示词，长按全选后手动复制";
+}
+
+$("btn-ai").addEventListener("click", async () => {
+  if (!currentData) { showStatus("数据还没加载好，稍候再点", "error"); return; }
+  const prompt = buildAiPrompt(currentData);
+  $("ai-text").textContent = prompt;
+  $("ai-box").hidden = false;
+  setAiStatus(await copyText(prompt));
+  if ($("ai-box").scrollIntoView) $("ai-box").scrollIntoView({ behavior: "smooth", block: "nearest" });
+});
+
+const aiCopyBtn = $("ai-copy");
+if (aiCopyBtn) aiCopyBtn.addEventListener("click", async () => {
+  const prompt = currentData ? buildAiPrompt(currentData) : $("ai-text").textContent || "";
+  setAiStatus(await copyText(prompt));
 });
 
 $("btn-logout").addEventListener("click", async () => {
@@ -402,4 +465,5 @@ loadData();
 // 测试钩子（浏览器中 window 存在，不生效；Node 冒烟测试用）
 if (typeof window === "undefined") {
   globalThis.__renderAll = renderAll;
+  globalThis.__buildAiPrompt = buildAiPrompt;
 }
