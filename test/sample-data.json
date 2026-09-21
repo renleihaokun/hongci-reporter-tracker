@@ -20,6 +20,19 @@
       ]
     },
     {
+      "id": "20260920LJB0046",
+      "audit_time": "2026/9/20 10:12:00",
+      "project": "尿沉渣",
+      "reviewer": "1732",
+      "items": [
+        { "name": "白细胞", "result": "45.2", "flag": "↑", "ref_lo": "0", "ref_hi": "25", "ref_text": "0~25" },
+        { "name": "白细胞团", "result": "1.8", "flag": "", "ref_lo": "0", "ref_hi": "5", "ref_text": "0~5" },
+        { "name": "红细胞总数", "result": "5.8", "flag": "", "ref_lo": "0", "ref_hi": "15", "ref_text": "0~15" },
+        { "name": "细菌", "result": "63.5", "flag": "", "ref_lo": "0", "ref_hi": "130", "ref_text": "0~130" },
+        { "name": "酵母菌", "result": "0.0", "flag": "", "ref_lo": "0", "ref_hi": "5", "ref_text": "0~5" }
+      ]
+    },
+    {
       "id": "20260919LJK0040",
       "audit_time": "2026/9/19 8:55:20",
       "project": "血常规",

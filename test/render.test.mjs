@@ -55,9 +55,9 @@ check(els["patient-sub"].textContent.includes("床位 942"), "副标题渲染床
 check(els["btn-ai"].hidden === true, "未配置AI时按钮隐藏");
 check(els["hero"].hidden === false, "汇总卡显示");
 check(els["hero-name"].textContent.includes("张三"), "汇总卡渲染患者名");
-check(els["stat-labs"].textContent === "4", "统计:检验4份");
+check(els["stat-labs"].textContent === "5", "统计:检验5份(含尿沉渣)");
 check(els["stat-us"].textContent === "1", "统计:超声1份");
-check(els["stat-abn"].textContent === "14", "统计:异常14项");
+check(els["stat-abn"].textContent === "15", "统计:异常15项(含尿沉渣白细胞↑)");
 check(els["stat-days"].textContent === "4", "统计:归档4天");
 check(els["hero-tags"].innerHTML.includes("九病区血液科"), "汇总卡标签渲染");
 check(els["trends-empty"].hidden === true, "有趋势数据时空提示隐藏");
@@ -65,8 +65,18 @@ const trendHtml = els["trends"].children.map((c) => c.innerHTML).join("");
 check(els["trends"].children.length === 5, "5 张趋势卡");
 check(trendHtml.includes("<svg"), "趋势 SVG 生成");
 check(trendHtml.includes("↓偏低"), "异常标记");
+// 回归：尿沉渣报告（audit_time 比当天血常规更新）的同名"白细胞"不得混入血白细胞趋势
+{
+  const wbcCard = els["trends"].children[0].innerHTML;
+  const circles = (wbcCard.match(/<circle/g) || []).length;
+  check(circles === 3, "白细胞趋势仅3个血常规点(尿沉渣已排除," + circles + "点)");
+  check(wbcCard.includes(">1.26<"), "白细胞最新值=血常规1.26(非尿沉渣45.2)");
+  check(wbcCard.includes("参考 4~10"), "白细胞参考带=血常规4~10(非尿沉渣0~25)");
+  check(!wbcCard.includes("45.2") && !wbcCard.includes("0~25"), "尿沉渣数值/参考带未混入白细胞卡");
+}
 const labsHtml = els["labs"].children.map((c) => c.innerHTML).join("");
 check(labsHtml.includes("血常规"), "检验报告渲染");
+check(labsHtml.includes("尿沉渣"), "尿沉渣报告正常展示在检验列表(只是不进趋势)");
 check(labsHtml.includes("1.26"), "检验数值渲染");
 check(labsHtml.includes("类=\"abn\"") || labsHtml.includes('class="abn"'), "异常行高亮");
 const usHtml = els["uss"].children.map((c) => c.innerHTML).join("");

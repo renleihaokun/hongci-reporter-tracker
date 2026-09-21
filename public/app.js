@@ -1,12 +1,22 @@
 /* 住院报告追踪 前端逻辑（无框架、无外部依赖） */
 "use strict";
 
+/* 报告类型过滤（与 functions/api/refresh.js 的 KEY_ITEMS 保持同步）：
+   血常规四项只从血常规类报告取数——尿沉渣报告里也有裸名"白细胞"（/μL，参考 0~25），
+   与血常规的白细胞（×10⁹/L，参考 4~10）同名不同物，混入会污染趋势与参考区间带；
+   CRP 散布在各类生化组合中（组合名不可枚举），改用体液黑名单排除法。
+   白名单失效表现为图变空白（显性），黑名单漏排会静默混入脏数据（隐性），故血指标用白名单。 */
+const BLOOD_PANEL_RE = /血常规|血细胞分析|全血细胞/;
+const FLUID_PANEL_RE = /尿|粪|便|大便|胸水|腹水|脑脊液|分泌物|痰|前列腺|灌洗|胃液|胆汁/;
+const bloodMetric = (match) => (rep, it) => BLOOD_PANEL_RE.test(rep.project || "") && match(String(it.name || ""));
+const serumMetric = (match) => (rep, it) => !FLUID_PANEL_RE.test(rep.project || "") && match(String(it.name || ""));
+
 const TREND_DEFS = [
-  ["白细胞 (WBC)", (n) => n === "白细胞"],
-  ["血红蛋白 (Hb)", (n) => n === "血红蛋白"],
-  ["血小板 (PLT)", (n) => n === "血小板计数"],
-  ["中性粒细胞 (ANC)", (n) => n === "中性粒细胞数"],
-  ["C-反应蛋白 (CRP)", (n) => n.includes("C-反应蛋白") || n.toUpperCase() === "CRP"],
+  ["白细胞 (WBC)", bloodMetric((n) => n === "白细胞")],
+  ["血红蛋白 (Hb)", bloodMetric((n) => n === "血红蛋白")],
+  ["血小板 (PLT)", bloodMetric((n) => n === "血小板计数")],
+  ["中性粒细胞 (ANC)", bloodMetric((n) => n === "中性粒细胞数")],
+  ["C-反应蛋白 (CRP)", serumMetric((n) => n.includes("C-反应蛋白") || n.toUpperCase() === "CRP")],
 ];
 
 const $ = (id) => document.getElementById(id);
@@ -139,7 +149,7 @@ function renderAll(data) {
     let ref = null;
     for (const rep of labs) {
       for (const it of rep.items || []) {
-        if (match(it.name)) {
+        if (match(rep, it)) {
           const v = parseFloat(it.result);
           if (!Number.isFinite(v)) continue;
           pts.push({ v, day: mmdd(rep.audit_time), flag: it.flag || "", t: parseDt(rep.audit_time) });

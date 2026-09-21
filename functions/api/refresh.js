@@ -1,12 +1,20 @@
 /** POST /api/refresh — 抓取医院最新报告，增量写入 D1，返回变化简报 */
 import { scrapeAll, scrapeLabDetail, DEFAULT_BASE } from "../_lib/scraper.js";
 
+/* 关键指标匹配（与 public/app.js 的 TREND_DEFS 保持同步）：
+   血常规四项只认血常规类报告——尿沉渣等体液报告里有同名"白细胞"，混入会污染摘要；
+   CRP 散布在各类生化组合中，用体液黑名单排除法 */
+const BLOOD_PANEL_RE = /血常规|血细胞分析|全血细胞/;
+const FLUID_PANEL_RE = /尿|粪|便|大便|胸水|腹水|脑脊液|分泌物|痰|前列腺|灌洗|胃液|胆汁/;
+const panelOk = (panel, project) =>
+  panel === "blood" ? BLOOD_PANEL_RE.test(project || "") : !FLUID_PANEL_RE.test(project || "");
+
 const KEY_ITEMS = [
-  ["白细胞 (WBC)", (n) => n === "白细胞"],
-  ["血红蛋白 (Hb)", (n) => n === "血红蛋白"],
-  ["血小板 (PLT)", (n) => n === "血小板计数"],
-  ["中性粒细胞 (ANC)", (n) => n === "中性粒细胞数"],
-  ["C-反应蛋白 (CRP)", (n) => n.includes("C-反应蛋白") || n.toUpperCase() === "CRP"],
+  ["白细胞 (WBC)", (n) => n === "白细胞", "blood"],
+  ["血红蛋白 (Hb)", (n) => n === "血红蛋白", "blood"],
+  ["血小板 (PLT)", (n) => n === "血小板计数", "blood"],
+  ["中性粒细胞 (ANC)", (n) => n === "中性粒细胞数", "blood"],
+  ["C-反应蛋白 (CRP)", (n) => n.includes("C-反应蛋白") || n.toUpperCase() === "CRP", "serum"],
 ];
 
 function parseDt(s) {
@@ -104,16 +112,17 @@ export async function onRequestPost(context) {
 
     // 关键指标最新值（从新增 + 已有中各报告最近一次）
     const latest = {};
-    const allLabs = await env.DB.prepare("SELECT audit_time, items_json FROM lab_reports").all();
+    const allLabs = await env.DB.prepare("SELECT audit_time, project, items_json FROM lab_reports").all();
     const parsed = (allLabs.results || []).map((r) => ({
       audit_time: r.audit_time,
+      project: r.project,
       items: JSON.parse(r.items_json || "[]"),
     }));
     parsed.sort((a, b) => parseDt(b.audit_time) - parseDt(a.audit_time));
-    for (const [label, match] of KEY_ITEMS) {
+    for (const [label, match, panel] of KEY_ITEMS) {
       outer: for (const rep of parsed) {
         for (const it of rep.items) {
-          if (match(it.name) && it.result !== undefined && !Number.isNaN(parseFloat(it.result))) {
+          if (panelOk(panel, rep.project) && match(String(it.name || "")) && it.result !== undefined && !Number.isNaN(parseFloat(it.result))) {
             latest[label] = { value: parseFloat(it.result), flag: it.flag || "", date: (rep.audit_time || "").slice(0, 10) };
             break outer;
           }
