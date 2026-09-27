@@ -141,6 +141,12 @@ export function parseLabDetail(page) {
   return items;
 }
 
+/* 医院网页端"没有明细"的占位页：详情页只回一句
+   「该记录如果未查询,可以到楼层自助机器查询！」（见微生物培养及鉴定等报告）。
+   这与"网络抖动/解析失败"是两回事——前者重试一万次也是空的，必须单独识别，
+   否则刷新会无限重试、永不归档。 */
+export const NO_DETAIL_MARK = /该记录如果未查询/;
+
 export function parseUsList(page) {
   const m = /<table class="zebra">([\s\S]*?)<\/table>/.exec(page);
   if (!m) return [];
@@ -185,8 +191,16 @@ export async function scrapeAll(base, pid) {
   return { labList, usList, structureSuspect };
 }
 
+/**
+ * 抓取单份检验报告明细。
+ * 返回 { items, noDetail }：
+ *   - items 非空            → 正常解析
+ *   - items 为空 & noDetail → 医院网页端本就不提供明细（占位页），属"已知无数据"，不该重试
+ *   - items 为空 & !noDetail→ 页面拿到但没解析出内容（结构变化/临时故障），回调方应重试
+ */
 export async function scrapeLabDetail(base, id) {
   const b = base.endsWith("/") ? base : base + "/";
   const page = await fetchText(b + "bh.asp?id=" + encodeURIComponent(id));
-  return parseLabDetail(page);
+  const items = parseLabDetail(page);
+  return { items, noDetail: items.length === 0 && NO_DETAIL_MARK.test(page) };
 }

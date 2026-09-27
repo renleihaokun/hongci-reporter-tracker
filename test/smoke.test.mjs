@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  parseLabList, parseLabDetail, parseUsList, splitRef,
+  parseLabList, parseLabDetail, parseUsList, splitRef, NO_DETAIL_MARK,
 } from "../functions/_lib/scraper.js";
 
 const FIX = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
@@ -47,6 +47,13 @@ eq(us.length, 1, "超声报告数");
 eq(us[0].report_time, "2026/9/15 8:18:23", "超声时间");
 eq(us[0].dept, "测试病区", "超声科室");
 eq(us[0].conclusion.includes("左侧颈部淋巴结肿大"), true, "超声结论");
+
+// 5) 医院网页端"不提供明细"的占位页（微生物培养及鉴定等）
+//    必须能被识别为 noDetail，否则会被当成抓取失败无限重试、永不归档
+const nodetailPage = readFileSync(join(FIX, "lab-detail-nodetail.html"), "utf8");
+eq(parseLabDetail(nodetailPage).length, 0, "占位页解析不出明细项");
+eq(NO_DETAIL_MARK.test(nodetailPage), true, "占位页命中 NO_DETAIL_MARK");
+eq(NO_DETAIL_MARK.test(readFileSync(join(FIX, "lab-detail.html"), "utf8")), false, "正常详情页不误判为占位页");
 
 console.log(fail === 0 ? "\n全部通过 ✔" : `\n${fail} 项失败 ✘`);
 process.exit(fail === 0 ? 0 : 1);

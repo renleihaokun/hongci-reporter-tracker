@@ -175,8 +175,8 @@ check(els["us-title"].hidden === false, "超声标题显示");
       ],
     });
   }
-  // 一份明细为空的报告（抓取失败待重试）不应显示"全部正常"
-  big.lab_reports.push({ id: "EMPTY1", audit_time: "2026/9/20 9:00:00", project: "异常结构报告", items: [] });
+  // 一份明细为空的报告（医院网页端不提供明细，如微生物培养）不应显示"全部正常"
+  big.lab_reports.push({ id: "EMPTY1", audit_time: "2026/9/20 9:00:00", project: "培养及鉴定", items: [] });
   // 怪参考范围不应产生 NaN 图表
   big.lab_reports.push({
     id: "WEIRD1", audit_time: "2026/9/20 9:10:00", project: "定性报告",
@@ -196,7 +196,12 @@ check(els["us-title"].hidden === false, "超声标题显示");
     check(labelCount <= 50, "X轴标签已抽稀(" + labelCount + "个)");
     check(!th.includes("NaN"), "图表无 NaN");
     const lh = els["labs"].children.map((c) => c.innerHTML).join("");
-    check(lh.includes("明细抓取失败") && !lh.includes("异常结构报告 · 09:00 <span class=\"badge ok\""), "空明细报告正确标记");
+    check(
+      lh.includes("医院未公布明细") &&
+        lh.includes("请到病区楼层自助机查询") &&
+        !/培养及鉴定 · 9:00 <span class="badge ok"/.test(lh),
+      "空明细报告标记为「医院未公布明细」而非「全部正常」"
+    );
     check(els["btn-metrics"].hidden === true, "大数据量下无新候选(白细胞/血红蛋白均属核心),面板按钮隐藏");
     check(els["mpanel"].hidden === true && els["mpanel"].innerHTML === "", "无候选时面板收起并清空");
   }

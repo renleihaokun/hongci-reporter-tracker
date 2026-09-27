@@ -56,30 +56,56 @@ export async function onRequestPost(context) {
     const rowsUs = await env.DB.prepare("SELECT uid FROM us_reports").all();
     for (const r of rowsUs.results || []) existingUs.add(r.uid);
 
+    // 复查历史上归档为"无明细"的报告（如微生物培养）：医院若补齐明细就就地更新。
+    // 放在增量抓取之前，避免把本轮刚入库的无明细报告重复抓一遍；
+    // 限额 3 条，避免挤占单次请求的子请求预算（免费版 50）。
+    const republished = [];
+    try {
+      const empties = await env.DB.prepare(
+        "SELECT id FROM lab_reports WHERE items_json = '[]' ORDER BY audit_time DESC LIMIT 3"
+      ).all();
+      for (const r of empties.results || []) {
+        const { items } = await scrapeLabDetail(base, r.id);
+        if (items.length) {
+          await env.DB.prepare("UPDATE lab_reports SET items_json = ? WHERE id = ?")
+            .bind(JSON.stringify(items), r.id).run();
+          republished.push({ id: r.id, item_count: items.length });
+        }
+      }
+    } catch (e) {
+      console.error("recheck no-detail reports failed", e);
+    }
+
     // 增量抓取检验详情（新的在前，先抓最新的；超限部分下轮继续）
     const pending = labList.filter((e) => !existing.has(e.id));
     const batch = pending.slice(0, limit);
     const hasMore = pending.length > batch.length;
     const newLabs = [];
     const failedDetails = [];
+    const noDetailLabs = [];
     for (const entry of batch) {
       let items = [];
-      let okFetch = false;
+      let noDetail = false;
       try {
-        items = await scrapeLabDetail(base, entry.id);
-        okFetch = true;
+        ({ items, noDetail } = await scrapeLabDetail(base, entry.id));
       } catch (e) {
         console.error("detail fetch failed", entry.id, e);
-      }
-      if (!okFetch || items.length === 0) {
-        // 抓取失败或明细为空：不写库，下次刷新自动重试，避免"空明细"被永久归档
         failedDetails.push({ id: entry.id, project: entry.project, audit_time: entry.audit_time });
         continue;
       }
+      if (!items.length && !noDetail) {
+        // 拿到页面却解析不出明细：疑似结构变化或临时故障 → 不写库，下次刷新重试，
+        // 避免"空明细"被永久归档
+        failedDetails.push({ id: entry.id, project: entry.project, audit_time: entry.audit_time });
+        continue;
+      }
+      // noDetail（医院网页端本就不提供明细，如微生物培养及鉴定）：照常归档并标注，
+      // 停止无意义的重试；上方"复查"逻辑保证医院日后补齐时能自动更新
       await env.DB.prepare(
         "INSERT OR IGNORE INTO lab_reports (id, audit_time, project, reviewer, items_json) VALUES (?, ?, ?, ?, ?)"
       ).bind(entry.id, entry.audit_time, entry.project, entry.reviewer, JSON.stringify(items)).run();
-      newLabs.push({ ...entry, items });
+      if (noDetail) noDetailLabs.push({ id: entry.id, project: entry.project, audit_time: entry.audit_time });
+      else newLabs.push({ ...entry, items });
     }
 
     // 增量写入超声
@@ -137,6 +163,8 @@ export async function onRequestPost(context) {
       pending_count: pending.length,
       has_more: hasMore,
       failed_details: failedDetails,
+      no_detail_labs: noDetailLabs,
+      republished,
       new_labs: newLabs.map((r) => ({
         id: r.id, project: r.project, audit_time: r.audit_time,
         abnormal: r.items.filter((i) => i.flag === "↑" || i.flag === "↓")

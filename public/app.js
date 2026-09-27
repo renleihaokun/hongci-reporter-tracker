@@ -450,7 +450,7 @@ function renderAll(data) {
       const tm = hmOf(rep.audit_time);
       const isNew = marks.labs.has(rep.id);
       const tag = !items.length
-        ? `<span class="badge" style="background:#fff3e0;color:#e65100">明细抓取失败</span>`
+        ? `<span class="badge" style="background:#eef2ff;color:#4338ca" title="医院网页端不提供该类报告的明细，可到病区楼层自助机查询">医院未公布明细</span>`
         : abn.length
           ? `<span class="badge hi">${abn.length}项异常</span>`
           : `<span class="badge ok">全部正常</span>`;
@@ -462,12 +462,16 @@ function renderAll(data) {
           `<td style="color:${color};font-weight:${isAbn ? 700 : 400}">${esc(it.result)}</td>` +
           `<td style="color:${color}">${esc(it.flag)}</td><td>${esc(it.ref_text)}</td></tr>`;
       }).join("");
+      const bodyHtml = items.length
+        ? `<table><tr><th>项目</th><th>结果</th><th>提示</th><th>参考范围</th></tr>${rows}</table>`
+        : `<div class="us-txt">该报告医院网页端未公布明细（多见于微生物培养及鉴定）。</div>` +
+          `<div class="us-txt">如需结果，请到病区楼层自助机查询，或向主管医生索取。</div>`;
       const card = document.createElement("div");
       card.className = "card";
       if (rep.id) card.id = "rep-" + rep.id;
       card.innerHTML =
         `<details${di === 0 ? " open" : ""}><summary><span>${esc(rep.project)} · ${esc(tm)} ${tag}${isNew ? '<span class="new-tag">新</span>' : ""}</span><span class="arrow">▶</span></summary>` +
-        `<div class="detail-body"><table><tr><th>项目</th><th>结果</th><th>提示</th><th>参考范围</th></tr>${rows}</table>` +
+        `<div class="detail-body">${bodyHtml}` +
         `<div class="rep-meta">标本号 ${esc(rep.id)} · 审核 ${esc(rep.audit_time)}</div></div></details>`;
       labsEl.appendChild(card);
     }
@@ -537,7 +541,7 @@ $("btn-refresh").addEventListener("click", async () => {
   };
   try {
     // 分批抓取：每轮 8 份（服务端上限 40），抓到多少显示多少，边抓边看
-    const acc = { new_lab_count: 0, new_us_count: 0, new_labs: [], new_us: [], failed_details: [], latest: null };
+    const acc = { new_lab_count: 0, new_us_count: 0, new_labs: [], new_us: [], failed_details: [], no_detail_labs: [], republished: [], latest: null };
     let totalNew = null;
     let lastHasMore = false;
     for (let round = 1; round <= 12; round++) {
@@ -575,16 +579,22 @@ $("btn-refresh").addEventListener("click", async () => {
         logLine(`<span class="ok">＋ ${esc(nl.project)}</span>（${esc(String(nl.audit_time || "").replace(/\s+/g, " "))}）${ab}`);
       }
       for (const f of j.failed_details || []) logLine(`<span class="warn">✗ ${esc(f.project)} 明细抓取失败，下次自动重试</span>`);
+      for (const nd of j.no_detail_labs || []) logLine(`<span class="warn">ℹ ${esc(nd.project)} 医院未公布明细，已归档（可到楼层自助机查询）</span>`);
+      for (const rp of j.republished || []) logLine(`<span class="ok">↻ ${esc(rp.id)} 医院已补齐明细（${rp.item_count} 项），已更新</span>`);
       acc.new_lab_count += j.new_lab_count || 0;
       acc.new_us_count += j.new_us_count || 0;
       acc.new_labs.push(...(j.new_labs || []));
       acc.new_us.push(...(j.new_us || []));
       acc.failed_details.push(...(j.failed_details || []));
+      acc.no_detail_labs.push(...(j.no_detail_labs || []));
+      acc.republished.push(...(j.republished || []));
       acc.latest = j.latest || acc.latest;
-      if (totalNew) pBar.style.width = Math.min(100, Math.round((acc.new_lab_count / totalNew) * 100)) + "%";
+      // 进度 = 已入库 + 已归档的无明细报告（无明细同样算"这一份处理完了"）
+      const doneCount = acc.new_lab_count + acc.no_detail_labs.length;
+      if (totalNew) pBar.style.width = Math.min(100, Math.round((doneCount / totalNew) * 100)) + "%";
       pText.textContent = totalNew
-        ? `已入库 ${acc.new_lab_count} / ${totalNew} 份检验报告…`
-        : `已入库 ${acc.new_lab_count} 份检验报告…`;
+        ? `已入库 ${doneCount} / ${totalNew} 份检验报告…`
+        : `已入库 ${doneCount} 份检验报告…`;
       loadData().catch(() => {}); // 增量渲染：抓到的立刻上屏
       if (!j.has_more) break;
     }
@@ -598,7 +608,7 @@ $("btn-refresh").addEventListener("click", async () => {
     } catch {}
 
     const lines = [];
-    if (acc.new_lab_count === 0 && acc.new_us_count === 0) {
+    if (acc.new_lab_count === 0 && acc.new_us_count === 0 && !acc.no_detail_labs.length) {
       lines.push("本次无新增报告，当前数据已是最新。");
     } else {
       if (acc.new_lab_count) {
@@ -606,7 +616,13 @@ $("btn-refresh").addEventListener("click", async () => {
         for (const r2 of acc.new_labs) lines.push(`· ${r2.project}（${r2.audit_time}）${r2.abnormal.length ? " 异常" + r2.abnormal.length + "项" : ""}`);
       }
       if (acc.new_us_count) lines.push(`新增超声报告 ${acc.new_us_count} 份`);
+      if (acc.no_detail_labs.length) {
+        lines.push("", `ℹ️ 另有 ${acc.no_detail_labs.length} 份报告医院网页端不提供明细，已归档：`);
+        for (const f of acc.no_detail_labs) lines.push(`· ${f.project}（${f.audit_time}）`);
+        lines.push("  这类报告（多为微生物培养及鉴定）需到病区楼层自助机查询。");
+      }
     }
+    if (acc.republished.length) lines.push("", `↻ 医院补齐了 ${acc.republished.length} 份此前无明细报告的明细，已更新归档。`);
     if (lastHasMore) lines.push("", "⚠️ 报告较多，一次没抓完，再点一次按钮继续。");
     if (acc.failed_details.length) {
       lines.push("", `⚠️ ${acc.failed_details.length} 份报告明细抓取失败，下次刷新会自动重试：`);
