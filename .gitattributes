@@ -1,0 +1,3 @@
+# GBK 页面快照是"真实字节"夹具（医院站就是 GBK），禁止任何换行/编码转换，
+# 否则 Windows 上 core.autocrlf 会把字节改掉，解码断言就会莫名其妙地挂。
+test/fixtures/*.gbk.html -text

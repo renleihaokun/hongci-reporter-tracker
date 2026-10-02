@@ -27,12 +27,20 @@ export async function onRequestPost(context) {
   const { env } = context;
   const pid = env.PATIENT_PID;
   if (!pid) {
-    return Response.json({ ok: false, error: "未配置环境变量 PATIENT_PID（住院号）" }, { status: 500 });
+    return Response.json({ ok: false, error: "未配置环境变量 PATIENT_PID（住院号）", retryable: false }, { status: 500 });
   }
   const base = env.HOSPITAL_BASE || DEFAULT_BASE;
-  // 免费版单次请求子请求上限 50，预留余量，单次最多抓 40 份新详情（剩余的下轮继续）
-  const MAX_DETAILS_PER_RUN = 40;
-  // ?limit=N：客户端分批抓取（小批量多轮，便于前端展示实时进度），默认 40
+  /* 免费版单次请求子请求上限 50。抓取已带"指数退避重试"（每份最坏 3 次尝试 = 3 个子请求），
+     上限要按最坏情况留余量：明细 10×3 + 列表 2×3 + 复查 2×3 = 42 ≤ 50。
+     前端本来就按 limit=8 分批多轮抓取，单轮调小不影响"一次点完"（has_more 会驱动下一轮）。 */
+  const MAX_DETAILS_PER_RUN = 10;
+  /* 单轮软超时：网络极差时每份报告都可能重试 3 次，一轮能拖很久；超过预算就收工，
+     剩下的靠 has_more 交给下一轮，避免浏览器一直转圈。
+     deadline 会透传给抓取层——过了这个点连"再试一次"也不再做，所以一轮 ≈ 预算 + 一次未完成的抓取。 */
+  const RUN_BUDGET_MS = 45_000;
+  const runStart = Date.now();
+  const scrapeOpts = { deadline: runStart + RUN_BUDGET_MS };
+  // ?limit=N：客户端分批抓取（小批量多轮，便于前端展示实时进度），默认 10
   let limit = MAX_DETAILS_PER_RUN;
   try {
     const q = parseInt(new URL(context.request.url).searchParams.get("limit") || "", 10);
@@ -40,10 +48,18 @@ export async function onRequestPost(context) {
   } catch {}
 
   try {
-    const { labList, usList, structureSuspect } = await scrapeAll(base, pid);
+    let labList, usList, structureSuspect;
+    try {
+      ({ labList, usList, structureSuspect } = await scrapeAll(base, pid, scrapeOpts));
+    } catch (e) {
+      // 抓取层失败（连接异常/超时/5xx，重试已用尽）→ 503 + retryable：
+      // 这类失败值得让浏览器侧再试一轮，可能过几秒医院网络就通了
+      return Response.json({ ok: false, error: String(e), retryable: true }, { status: 503 });
+    }
     if (structureSuspect) {
       return Response.json({
         ok: false,
+        retryable: false, // 页面结构变了，重试一万次也一样
         error: "医院页面结构可能已变化：页面含报告链接但解析结果为 0，请检查 functions/_lib/scraper.js 的解析规则",
       }, { status: 502 });
     }
@@ -58,14 +74,15 @@ export async function onRequestPost(context) {
 
     // 复查历史上归档为"无明细"的报告（如微生物培养）：医院若补齐明细就就地更新。
     // 放在增量抓取之前，避免把本轮刚入库的无明细报告重复抓一遍；
-    // 限额 3 条，避免挤占单次请求的子请求预算（免费版 50）。
+    // 限额 2 条：抓取带重试（最坏 3 个子请求/份），要给单次请求的子请求预算（免费版 50）留余量。
     const republished = [];
     try {
       const empties = await env.DB.prepare(
-        "SELECT id FROM lab_reports WHERE items_json = '[]' ORDER BY audit_time DESC LIMIT 3"
+        "SELECT id FROM lab_reports WHERE items_json = '[]' ORDER BY audit_time DESC LIMIT 2"
       ).all();
       for (const r of empties.results || []) {
-        const { items } = await scrapeLabDetail(base, r.id);
+        if (Date.now() - runStart > RUN_BUDGET_MS) break;
+        const { items } = await scrapeLabDetail(base, r.id, scrapeOpts);
         if (items.length) {
           await env.DB.prepare("UPDATE lab_reports SET items_json = ? WHERE id = ?")
             .bind(JSON.stringify(items), r.id).run();
@@ -79,15 +96,17 @@ export async function onRequestPost(context) {
     // 增量抓取检验详情（新的在前，先抓最新的；超限部分下轮继续）
     const pending = labList.filter((e) => !existing.has(e.id));
     const batch = pending.slice(0, limit);
-    const hasMore = pending.length > batch.length;
+    let hasMore = pending.length > batch.length;
+    let timedOutMidway = false;
     const newLabs = [];
     const failedDetails = [];
     const noDetailLabs = [];
     for (const entry of batch) {
+      if (Date.now() - runStart > RUN_BUDGET_MS) { timedOutMidway = true; hasMore = true; break; }
       let items = [];
       let noDetail = false;
       try {
-        ({ items, noDetail } = await scrapeLabDetail(base, entry.id));
+        ({ items, noDetail } = await scrapeLabDetail(base, entry.id, scrapeOpts));
       } catch (e) {
         console.error("detail fetch failed", entry.id, e);
         failedDetails.push({ id: entry.id, project: entry.project, audit_time: entry.audit_time });
@@ -162,6 +181,7 @@ export async function onRequestPost(context) {
       new_us_count: newUs.length,
       pending_count: pending.length,
       has_more: hasMore,
+      timed_out_midway: timedOutMidway,
       failed_details: failedDetails,
       no_detail_labs: noDetailLabs,
       republished,
@@ -175,6 +195,8 @@ export async function onRequestPost(context) {
       refreshed_at: now,
     });
   } catch (e) {
-    return Response.json({ ok: false, error: String(e) }, { status: 500 });
+    // 走到这里的是抓取层之外的故障（D1 语句/数据格式/代码问题）——重试不会变好，
+    // 标 retryable:false 让浏览器侧立刻把真实原因显示给用户，而不是白等 4 轮重试。
+    return Response.json({ ok: false, error: String(e), retryable: false }, { status: 500 });
   }
 }

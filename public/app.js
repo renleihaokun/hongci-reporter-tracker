@@ -61,8 +61,66 @@ function showStatus(text, kind) {
   el.className = "status" + (kind ? " " + kind : "");
 }
 
-/* 不可重试的错误（如医院页面结构变化），直接抛给用户 */
-class FatalErr extends Error {}
+/* ---------- 网络重试（指数退避）----------
+ * 医院站点挂在公网，家属多在院内 WiFi / 手机流量下刷新，失败几乎都是瞬时抖动：
+ * 连接被掐、502/504、响应体读了一半断掉。统一在 fetch 这一层做指数退避重试
+ * （0.8s → 1.6s → 3.2s，±25% 抖动、单次退避上限 8s，最多 4 次尝试），
+ * 让"医院网烂"不再需要用户手动点第二次按钮。
+ * 确定性的结果不重试：401（要登录）、其余 4xx（请求本身有问题）、命中 isFatal 的响应体
+ * （如"医院页面结构可能已变化"，重试一万次也一样）。 */
+const RETRY_ATTEMPTS = 4;
+const RETRY_BASE_MS = 800;
+const RETRY_MAX_MS = 8000;
+
+/* 第 attempt 次尝试失败后该等多久（attempt 从 1 起）：指数退避 + 抖动，
+   抖动是为了避免同一轮里多份报告同时失败、又同时重试，在医院那头形成脉冲 */
+function retryDelayMs(attempt, rnd) {
+  const r = typeof rnd === "function" ? rnd() : Math.random();
+  const base = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (Math.max(1, attempt) - 1));
+  return Math.round(base * (0.75 + 0.5 * r));
+}
+
+/* fetch + 自动重试 → { status, json }。网络异常 / 5xx / 429 / 响应体截断都会重试；
+ * isFatal(json) 命中时立刻返回给调用方（不再白等）。sleep 可注入，便于测试。 */
+async function fetchJsonRetry(url, init, opts = {}) {
+  const attempts = opts.attempts || RETRY_ATTEMPTS;
+  const sleep = opts.sleep || ((ms) => new Promise((res) => setTimeout(res, ms)));
+  let lastErr = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const r = await fetch(url, init);
+      const status = typeof r.status === "number" ? r.status : 200;
+      if (status === 401) return { status, json: null };
+      let json = null;
+      let parseErr = null;
+      try { json = await r.json(); } catch (e) { parseErr = e; } // 网络中断常在这里抛
+      if (json && typeof opts.isFatal === "function" && opts.isFatal(json)) return { status, json };
+      if (!parseErr && status !== 408 && status !== 425 && status !== 429 && status < 500) return { status, json };
+      // 服务端说了原因就用它的（如 D1 报错），比一句"HTTP 500"有用得多
+      throw parseErr || (json && json.error ? new Error(json.error) : new Error(`HTTP ${status}（服务端暂时不可用）`));
+    } catch (e) {
+      lastErr = e;
+      if (attempt >= attempts) break;
+      const delayMs = retryDelayMs(attempt);
+      if (typeof opts.onRetry === "function") opts.onRetry(attempt, delayMs, e);
+      await sleep(delayMs);
+    }
+  }
+  throw lastErr || new Error("请求失败");
+}
+
+/* 自动重试提示：成功时原样清掉，避免覆盖刷新总结等其它文案 */
+let retryNotice = "";
+const refreshRunning = () => Boolean($("btn-refresh") && $("btn-refresh").disabled);
+/* 能不能把重试提示写进状态栏：刷新进行中不抢（进度区已有实时文案）；
+   状态栏已有别的文案（如刷新总结）也不抢，否则一旦被重试提示盖掉，总结就再也回不来了 */
+function canShowRetryNotice(statusText) {
+  return !refreshRunning() && (!statusText || statusText === retryNotice);
+}
+function clearRetryNotice() {
+  if (retryNotice && $("status").textContent === retryNotice) showStatus("");
+  retryNotice = "";
+}
 
 /* 本次刷新新增的报告标记（会话内高亮"新"） */
 function loadNewMarks() {
@@ -502,19 +560,26 @@ function needLogin() {
 
 async function loadData() {
   try {
-    const r = await fetch("/api/data");
-    if (r.status === 401) { needLogin(); return; }
-    const j = await r.json();
-    if (!j.ok) throw new Error(j.error || "加载失败");
+    const { status, json: j } = await fetchJsonRetry("/api/data", undefined, {
+      onRetry: (attempt, delayMs) => {
+        if (!canShowRetryNotice($("status").textContent)) return;
+        retryNotice = `网络不太稳定，${(delayMs / 1000).toFixed(1)} 秒后自动重试（第 ${attempt}/${RETRY_ATTEMPTS} 次）…`;
+        showStatus(retryNotice);
+      },
+    });
+    if (status === 401) { needLogin(); return; }
+    if (!j || !j.ok) throw new Error((j && j.error) || "加载失败");
     currentData = j;
     renderAll(j);
+    clearRetryNotice();
   } catch (e) {
-    // 网络抖动常见：给出可点的重试入口，不用整页刷新
+    // 已自动重试仍失败：给出可点的重试入口，不用整页刷新
     const el = $("status");
     el.hidden = false;
     el.className = "status error";
     el.innerHTML = "";
-    el.append("加载数据失败：" + e.message + "（多为网络波动） ");
+    el.append(`加载数据失败：${e.message}（已自动重试 ${RETRY_ATTEMPTS} 次，多为网络波动） `);
+    retryNotice = "";
     const retry = document.createElement("button");
     retry.className = "retry-btn";
     retry.textContent = "点我重试";
@@ -540,35 +605,26 @@ $("btn-refresh").addEventListener("click", async () => {
     if (pLog.scrollTo) pLog.scrollTop = pLog.scrollHeight;
   };
   try {
-    // 分批抓取：每轮 8 份（服务端上限 40），抓到多少显示多少，边抓边看
+    // 分批抓取：每轮 8 份（服务端单轮上限 10，因为抓取带重试、要省子请求预算），抓到多少显示多少，边抓边看
     const acc = { new_lab_count: 0, new_us_count: 0, new_labs: [], new_us: [], failed_details: [], no_detail_labs: [], republished: [], latest: null };
     let totalNew = null;
     let lastHasMore = false;
+    let lastTimeout = false;
     for (let round = 1; round <= 12; round++) {
       pText.textContent = round === 1 ? "正在连接医院查询系统，获取报告列表…" : `第 ${round} 轮：继续抓取报告明细…`;
-      // 网络不稳自动重试：服务端按"已入库"去重，重复请求无副作用
-      let j = null;
-      let lastErr = null;
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-          const r = await fetch("/api/refresh?limit=8", { method: "POST" });
-          if (r.status === 401) { needLogin(); return; }
-          j = await r.json();
-          if (!j.ok && String(j.error || "").includes("结构")) throw new FatalErr(j.error || "医院页面结构变化");
-          break;
-        } catch (e) {
-          lastErr = e;
-          j = null;
-          if (e instanceof FatalErr) throw e;
-          if (attempt < 3) {
-            pText.textContent = `网络不稳定，3 秒后自动重试（第 ${attempt}/3 次）…`;
-            await new Promise((res) => setTimeout(res, 3000));
-          }
-        }
-      }
-      if (!j) throw lastErr || new Error("刷新失败");
+      // 医院网络不稳自动重试（指数退避）：服务端按"已入库"去重，重复请求无副作用
+      const { status: rStatus, json: j } = await fetchJsonRetry("/api/refresh?limit=8", { method: "POST" }, {
+        // 确定性失败不重试：医院页面结构变化、缺配置、服务端自己标了 retryable:false（重试一万次也一样）
+        isFatal: (x) => Boolean(x) && (x.retryable === false || /结构|PATIENT_PID/.test(String(x.error || ""))),
+        onRetry: (attempt, delayMs) => {
+          pText.textContent = `网络不稳定，${(delayMs / 1000).toFixed(1)} 秒后自动重试（第 ${attempt}/${RETRY_ATTEMPTS} 次）…`;
+        },
+      });
+      if (rStatus === 401) { needLogin(); return; }
+      if (!j) throw new Error("服务端返回空响应，请稍后重试");
       if (!j.ok) throw new Error(j.error || "刷新失败");
       lastHasMore = !!j.has_more;
+      if (j.timed_out_midway) lastTimeout = true;
       if (totalNew === null && typeof j.pending_count === "number" && j.pending_count > 0) {
         totalNew = j.pending_count;
         logLine(`发现 <b>${totalNew}</b> 份新检验报告，开始抓取明细`);
@@ -623,7 +679,7 @@ $("btn-refresh").addEventListener("click", async () => {
       }
     }
     if (acc.republished.length) lines.push("", `↻ 医院补齐了 ${acc.republished.length} 份此前无明细报告的明细，已更新归档。`);
-    if (lastHasMore) lines.push("", "⚠️ 报告较多，一次没抓完，再点一次按钮继续。");
+    if (lastHasMore) lines.push("", lastTimeout ? "⚠️ 医院网络较慢，这次的 45 秒预算用完了，再点一次按钮继续。" : "⚠️ 报告较多，一次没抓完，再点一次按钮继续。");
     if (acc.failed_details.length) {
       lines.push("", `⚠️ ${acc.failed_details.length} 份报告明细抓取失败，下次刷新会自动重试：`);
       for (const f of acc.failed_details) lines.push(`· ${f.project}（${f.audit_time}）`);
@@ -855,4 +911,7 @@ if (typeof window === "undefined") {
   globalThis.__buildCsv = buildCsv;
   globalThis.__coreSeries = coreSeries;
   globalThis.__mpPickRows = mpPickRows;
+  globalThis.__fetchJsonRetry = fetchJsonRetry;
+  globalThis.__retryDelayMs = retryDelayMs;
+  globalThis.__canShowRetryNotice = canShowRetryNotice;
 }

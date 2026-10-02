@@ -223,5 +223,104 @@ check(els["us-title"].hidden === false, "超声标题显示");
   }
 }
 
+// ---- 客户端网络重试（指数退避）----
+{
+  const delay = globalThis.__retryDelayMs;
+  const fr = globalThis.__fetchJsonRetry;
+  if (typeof delay !== "function" || typeof fr !== "function") { console.log("FAIL: 重试钩子未暴露"); fail++; }
+  else {
+    check(delay(1, () => 0.5) === 800, "退避：第 1 次 0.8s");
+    check(delay(2, () => 0.5) === 1600 && delay(3, () => 0.5) === 3200, "退避：指数增长 1.6s → 3.2s");
+    check(delay(9, () => 0.5) === 8000, "退避上限 8s");
+    check(delay(1, () => 0) === 600 && delay(1, () => 1) === 1000, "退避 ±25% 抖动");
+
+    const realFetch = globalThis.fetch;
+    const noSleep = { sleep: async () => {} };
+    try {
+      // 连续两次网络异常后成功
+      {
+        const calls = [];
+        const seen = [];
+        globalThis.fetch = async (url) => {
+          calls.push(String(url));
+          if (calls.length < 3) throw new TypeError("Failed to fetch");
+          return { status: 200, json: async () => ({ ok: true, data: 1 }) };
+        };
+        const r = await fr("/api/refresh", { method: "POST" }, { ...noSleep, onRetry: (a, d) => seen.push([a, d]) });
+        check(calls.length === 3 && r.json && r.json.ok === true, "抖动两次后自动重试成功");
+        check(
+          seen.length === 2 && seen[0][0] === 1 && seen[0][1] >= 600 && seen[0][1] <= 1000 &&
+            seen[1][0] === 2 && seen[1][1] >= 1200 && seen[1][1] <= 2000,
+          "重试提示带递增的退避秒数(" + JSON.stringify(seen) + ")"
+        );
+      }
+      // 502 服务端故障 → 重试到用尽，且把服务端给的原因带出来
+      {
+        let n = 0;
+        globalThis.fetch = async () => { n++; return { status: 502, json: async () => ({ ok: false, error: "boom" }) }; };
+        let err = null;
+        try { await fr("/api/refresh", { method: "POST" }, noSleep); } catch (e) { err = e; }
+        check(n === 4, "502 重试到 4 次尝试用尽(" + n + ")");
+        check(err && err.message === "boom", "重试用尽后抛出服务端给的原因(" + (err && err.message) + ")");
+      }
+      // 响应体截断（JSON 解析失败）→ 重试
+      {
+        let n = 0;
+        globalThis.fetch = async () => {
+          n++;
+          if (n === 1) return { status: 200, json: async () => { throw new SyntaxError("Unexpected end of JSON input"); } };
+          return { status: 200, json: async () => ({ ok: true }) };
+        };
+        const r = await fr("/api/data", undefined, noSleep);
+        check(n === 2 && r.json.ok === true, "响应体截断 → 重试后拿到完整数据");
+      }
+      // 确定性结果不重试：401 / 结构变化 / 404
+      {
+        let n401 = 0;
+        globalThis.fetch = async () => { n401++; return { status: 401, json: async () => ({ ok: false }) }; };
+        const r401 = await fr("/api/data", undefined, noSleep);
+        check(n401 === 1 && r401.status === 401 && r401.json === null, "401 不重试，交给登录跳转");
+
+        let nFatal = 0;
+        globalThis.fetch = async () => {
+          nFatal++;
+          return { status: 502, json: async () => ({ ok: false, error: "医院页面结构可能已变化：xxx" }) };
+        };
+        const rFatal = await fr("/api/refresh", { method: "POST" }, {
+          ...noSleep, isFatal: (j) => String((j && j.error) || "").includes("结构"),
+        });
+        check(nFatal === 1 && rFatal.json.ok === false, "医院页面结构变化不浪费重试");
+
+        let n404 = 0;
+        globalThis.fetch = async () => { n404++; return { status: 404, json: async () => ({ ok: false, error: "not found" }) }; };
+        const r404 = await fr("/api/data", undefined, noSleep);
+        check(n404 === 1 && r404.json.ok === false, "普通 4xx 不重试");
+      }
+      // 408/425 与服务端 retry.js 保持一致：算临时失败
+      {
+        let n = 0;
+        globalThis.fetch = async () => { n++; return { status: 408, json: async () => ({ ok: false, error: "timeout" }) }; };
+        let err = null;
+        try { await fr("/api/data", undefined, noSleep); } catch (e) { err = e; }
+        check(n === 4 && err && err.message === "timeout", "408 也算临时失败（重试 4 次后带出原因）");
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+
+    // 状态栏文案守卫：别让重试提示盖掉刷新总结
+    const canShow = globalThis.__canShowRetryNotice;
+    if (typeof canShow !== "function") { console.log("FAIL: canShowRetryNotice 未暴露"); fail++; }
+    else {
+      check(canShow("") === true, "状态栏为空 → 允许显示重试提示");
+      check(canShow("本次无新增报告，当前数据已是最新。") === false, "状态栏已有刷新总结 → 不覆盖");
+      els["btn-refresh"].disabled = true;
+      check(canShow("") === false, "刷新进行中 → 重试提示走进度区，不抢状态栏");
+      els["btn-refresh"].disabled = false;
+      els["status"].textContent = "";
+    }
+  }
+}
+
 console.log(fail === 0 ? "\n渲染冒烟测试全部通过 ✔" : `\n${fail} 项失败 ✘`);
 process.exit(fail ? 1 : 0);

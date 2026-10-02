@@ -23,6 +23,7 @@
 - 🌗 **深色模式**：跟随系统外观自动切换（`prefers-color-scheme`），图表配色同步适配；另提供 `?dark=1` / `?light=1` 调试参数
 - ⬇ **导出 CSV**：检验报告一键导出为 CSV（带 BOM，Excel 直接打开），含报告类型、日期、项目、结果、参考区间、异常标记
 - 🔄 **一键刷新**：`获取最新报告`按钮，服务端抓取医院页面，增量入库，返回新增与异常摘要
+- 🔁 **网络自动重试（指数退避）**：医院网不稳不再"点一次失败一次"。服务端每次抓取最多 3 次尝试（退避 0.5s → 1s + 抖动，单次尝试 12s 超时），浏览器侧加载与刷新最多 4 次尝试（退避 0.8s → 1.6s → 3.2s + 抖动）；连接被掐、502/504、响应读了一半断掉都会自动重试，只有登录失效、医院页面结构变化这类"确定性失败"才立刻停下
 - 🗂 **全量归档**：检验明细 + 超声所见/结论，按日期分组，不受医院 7 天窗口限制
 - 🤖 **AI 解读（零成本 / 免 API）**：一键生成分析提示词并复制到剪贴板，去 DeepSeek 网页版或 App 粘贴提问，自动获得家属能看懂的通俗解读；服务端不存任何 API Key
 - 📱 **移动端优先**：手机浏览器直接使用，无需构建工具、无前端依赖
@@ -43,6 +44,8 @@ Cloudflare D1（SQLite）：lab_reports / us_reports / meta
 
 - 抓取解析逻辑在 `functions/_lib/scraper.js`：GBK 解码、报告卡片解析、**参考范围智能拆分**（源站数据丢失分隔符，如 `4.0010.00` 实为 4.00~10.00，用结果值+箭头方向一致性还原）
 - **"医院不提供明细"与"抓取失败"分开处理**：微生物培养及鉴定类报告（血培养、PICC 培养、肛拭子培养等）医院网页端只回占位提示「该记录如果未查询,可以到楼层自助机器查询！」，属于**已知无数据**，不是网络故障。这类报告照常归档并在前端标注「医院未公布明细」，只重试真正的临时失败，避免无限重试、永不归档
+- **抓取自带指数退避重试**：重试策略只有一处实现——`functions/_lib/retry.js`（退避曲线、抖动、`Retry-After`、可重试错误分类），`scraper.js` 的 `fetchText` 把每一次医院请求都包在里面，`public/app.js` 的 `fetchJsonRetry` 在浏览器侧做同款退避。抖动是必需的：一次抖动往往让同一轮里好几份报告同时失败，若同时重试会在医院那头形成脉冲。重试会放大子请求数，所以**单轮明细上限从 40 收紧到 10**（最坏 10×3 明细 + 2×3 列表 + 2×3 复查 = 42 ≤ 免费版 50 子请求上限）；前端本来就按 `limit=8` 分批多轮抓取，感知不到差别。另有 **45s 单轮软超时**：这个 deadline 会透传进抓取层，过了点连"再试一次"都不做，超时就返回 `has_more` 让下一轮接着抓，避免浏览器一直转圈
+- **确定性失败不重试**：`/api/refresh` 会在响应里标 `retryable`——抓取层失败（连接/超时/5xx）返回 503 + `retryable:true`（值得让浏览器再试一轮），D1/解析/代码类故障返回 500 + `retryable:false` 并原样透出原因（如 `D1_ERROR: ...`），前端据此立刻停手、把真实原因显示出来，而不是白等 4 轮重试
 - **关键指标按报告类型过滤**：尿沉渣等体液报告里也有同名"白细胞"（/μL）与血常规白细胞（×10⁹/L）不同量纲，趋势与最新值只从血常规类报告取数（`app.js` 与 `refresh.js` 各维护一份同步的过滤规则）
 - 医院查询无需鉴权（住院号即凭证）、无需会话 Cookie，Function 直接抓取
 
@@ -106,16 +109,28 @@ npx wrangler pages dev public --d1 DB=hongci-reports \
 
 ```bash
 node test/smoke.test.mjs    # 抓取解析逻辑
-node test/render.test.mjs   # 前端渲染逻辑（含"尿沉渣白细胞不得混入趋势"回归）
+node test/retry.test.mjs    # 指数退避重试（连接异常 / 超时 / 5xx / 读流中断 / Retry-After）
+node test/refresh.test.mjs  # /api/refresh 端到端（内存 D1 桩件 + GBK 页面快照：抖动重试、无明细归档、结构变化预警、limit 分批）
+node test/render.test.mjs   # 前端渲染逻辑 + 浏览器侧退避（含"尿沉渣白细胞不得混入趋势"回归）
 node test/auth.test.mjs     # 访问控制
+```
+
+`test/fixtures/*.gbk.html` 是与同目录 `*.html` 内容一致的 **GBK 字节快照**（医院站就是 GBK，用真实字节快照才能顺带验证 `gb18030` 解码路径）。改动 `*.html` 后用这段 PowerShell 重新生成：
+
+```powershell
+$enc = [Text.Encoding]::GetEncoding('gb18030')
+Get-ChildItem test/fixtures/*.html | Where-Object { $_.Name -notlike '*.gbk.html' } | ForEach-Object {
+  [IO.File]::WriteAllBytes(($_.FullName -replace '\.html$', '.gbk.html'), $enc.GetBytes((Get-Content -Raw -Encoding UTF8 $_.FullName)))
+}
 ```
 
 ## 常见问题
 
 - **刷新按钮多久点一次？** 血常规通常上午 8:30–9:30 审核发布，下午偶有特殊项目。建议上午十点左右点一次。
+- **点了刷新一直转圈 / 提示失败？** 医院网络抖动很常见，现在会**自动重试**：服务端每份报告最多抓 3 次（退避 0.5s → 1s，单次尝试 12 秒超时），浏览器侧每轮最多 4 次请求（退避 0.8s → 1.6s → 3.2s），进度区会显示"网络不稳定，X 秒后自动重试（第 N/4 次）"。一轮软超时 45 秒，超了就返回"下次继续"，再点一次按钮会从断点接着抓（已入库的不会重复、不会丢）。若重试后仍失败，页面上会列出是哪几份明细没抓到（下次刷新自动补），或者直接显示服务端返回的真实原因。
 - **有报告一直显示「医院未公布明细」？** 这是医院网页端的问题，不是抓取失败：微生物**培养及鉴定**类报告（外周血培养、单腔 PICC 培养、肛拭子培养等）在网页详情页只返回一句「该记录如果未查询,可以到楼层自助机器查询！」，没有任何数据——用手机在公众号里手动点开也是空的。程序会把这类报告照常归档并按「医院未公布明细」标注（带提示，不再反复重试）；需要具体结果请到病区楼层自助机查询，或向主管医生索取。若医院日后补齐明细，下一次刷新会自动更新归档。
 - **页面会被外人看到吗？** 配置 `ACCESS_PASSWORD` 后，全站需密码登录（Cookie 30 天有效，家人输一次即可）。需要更强保护可再叠加 Cloudflare Access（Zero Trust → Access → 添加应用）。
-- **想自动定时刷新？** Pages Functions 不支持 Cron Trigger。可以再建一个独立的 Cloudflare Worker（Cron）每天 POST 一次你的 `/api/refresh`，或用 GitHub Actions 定时触发。若配置了 `ACCESS_PASSWORD`，请求需带 Cookie：`hc_auth=<密码的SHA-256十六进制>`（例如 `curl -X POST -H "Cookie: hc_auth=$(echo -n '你的密码' | sha256sum | cut -d' ' -f1)" https://你的域名/api/refresh`）。欢迎 PR 补充示例。
+- **想自动定时刷新？** Pages Functions 不支持 Cron Trigger。可以再建一个独立的 Cloudflare Worker（Cron）每天 POST 一次你的 `/api/refresh`，或用 GitHub Actions 定时触发。若配置了 `ACCESS_PASSWORD`，请求需带 Cookie：`hc_auth=<密码的SHA-256十六进制>`（例如 `curl -X POST -H "Cookie: hc_auth=$(echo -n '你的密码' | sha256sum | cut -d' ' -f1)" https://你的域名/api/refresh`）。注意单次请求最多抓 10 份新明细（重试要占子请求预算），首次全量归档请循环 POST 直到响应里 `has_more` 为 false；日常增量一次就够。欢迎 PR 补充示例。
 - **其他医院能用吗？** 抓取解析是针对该医院查询系统页面结构写的。若你所在医院使用相同系统（页面结构一致），改 `HOSPITAL_BASE` 即可；否则需改写 `functions/_lib/scraper.js` 的解析函数，欢迎提 Issue/PR。
 
 ## 隐私与免责
@@ -134,16 +149,19 @@ node test/auth.test.mjs     # 访问控制
 │   ├── styles.css
 │   └── app.js
 ├── functions/
-│   ├── _lib/scraper.js   # 医院页面抓取与解析（GBK、参考范围智能拆分）
+│   ├── _lib/retry.js     # 唯一的重试策略：指数退避 + 抖动 + Retry-After + 可重试错误分类
+│   ├── _lib/scraper.js   # 医院页面抓取（GBK、单次超时、退避重试）与解析（参考范围智能拆分）
 │   └── api/
 │       ├── refresh.js    # POST /api/refresh 增量抓取入库
 │       ├── data.js       # GET  /api/data    全量读取
 │       └── login.js      # 访问密码登录/登出
 ├── schema.sql         # D1 建表语句
 └── test/
-    ├── fixtures/         # 医院页面结构快照（虚构数据，含"无明细占位页"回归用例）
+    ├── fixtures/         # 医院页面结构快照（虚构数据；*.html 为 UTF-8 源，*.gbk.html 为 GBK 字节快照）
     ├── smoke.test.mjs    # 解析逻辑冒烟测试
-    ├── render.test.mjs   # 前端渲染 + 指标过滤回归
+    ├── retry.test.mjs    # 指数退避重试测试（含超时、读流中断、Retry-After、连接卡住）
+    ├── refresh.test.mjs  # /api/refresh 端到端（内存 D1 桩件 + 桩 fetch）
+    ├── render.test.mjs   # 前端渲染 + 指标过滤 + 浏览器侧退避
     └── auth.test.mjs     # 访问控制测试
 ```
 

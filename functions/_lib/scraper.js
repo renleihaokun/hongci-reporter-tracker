@@ -3,6 +3,8 @@
  * 站点为 Classic ASP + GBK 编码，查询无需鉴权（住院号即凭证），无需会话 Cookie。
  */
 
+import { withRetry, isRetryableError, HttpError, parseRetryAfter } from "./retry.js";
+
 export const DEFAULT_BASE = "http://wx.hcxyb.cn:88/";
 
 const UA =
@@ -10,17 +12,78 @@ const UA =
   "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 " +
   "MicroMessenger/8.0.47 NetType/WIFI Language/zh_CN";
 
-async function fetchText(url, params) {
+/* 单次尝试超时：医院正常 1~3 秒返回；12 秒还没回基本是连接断了。
+   没有超时的话，一次"卡住的连接"会把整个刷新请求拖到平台超时——这正是"自动重试"失效的常见原因。 */
+export const FETCH_TIMEOUT_MS = 12000;
+
+/** 单次尝试的超时信号：优先 AbortSignal.timeout，退化用 AbortController + setTimeout */
+function timeoutSignal(ms) {
+  if (!ms || ms <= 0) return { signal: undefined, timedOut: () => false, cancel: () => {} };
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    // 这个 signal 只会因为超时而 abort，所以 aborted 就是"超时了"
+    const signal = AbortSignal.timeout(ms);
+    return { signal, timedOut: () => signal.aborted, cancel: () => {} };
+  }
+  let fired = false;
+  const ac = new AbortController();
+  const t = setTimeout(() => { fired = true; ac.abort(); }, ms);
+  return { signal: ac.signal, timedOut: () => fired, cancel: () => clearTimeout(t) };
+}
+
+/** 单次抓取：返回 GBK 解码后的文本；HTTP 非 2xx 抛 HttpError（带 retryable 标记） */
+async function fetchOnce(url, params, timeoutMs) {
   const init = { headers: { "User-Agent": UA } };
   if (params) {
     init.method = "POST";
     init.headers["Content-Type"] = "application/x-www-form-urlencoded";
     init.body = new URLSearchParams(params).toString();
   }
-  const resp = await fetch(url, init);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}`);
-  const buf = await resp.arrayBuffer();
-  return new TextDecoder("gb18030").decode(buf);
+  const timer = timeoutSignal(timeoutMs);
+  if (timer.signal) init.signal = timer.signal;
+  try {
+    const resp = await fetch(url, init);
+    if (!resp.ok) {
+      if (resp.body) { try { await resp.body.cancel(); } catch {} } // 不读的响应体显式放掉，别占着连接
+      throw new HttpError(resp.status, url, parseRetryAfter(resp.headers?.get?.("Retry-After")));
+    }
+    const buf = await resp.arrayBuffer(); // 读流中途断掉也会在 withRetry 里重试
+    return new TextDecoder("gb18030").decode(buf);
+  } catch (e) {
+    if (timer.timedOut()) {
+      const err = new Error(`请求超时（超过 ${timeoutMs}ms，医院网络可能不通）`);
+      err.name = "TimeoutError";
+      err.retryable = true;
+      throw err;
+    }
+    throw e;
+  } finally {
+    timer.cancel();
+  }
+}
+
+/**
+ * 带指数退避重试的抓取（医院网络抖动是常态，一次抖动不该让整轮刷新失败）。
+ * 默认 3 次尝试：500ms → 1s（±25% 抖动）；可重试 408/425/429/5xx、连接异常、单次尝试超时。
+ * opts 可覆盖 attempts/baseDelayMs/factor/maxDelayMs/jitter/sleep/isRetryable/onRetry 与 timeoutMs。
+ * opts.deadline（绝对时间戳）用于整轮预算：过了这个点就不再重试，避免一轮被拖成好几分钟。
+ */
+export async function fetchText(url, params, opts = {}) {
+  const deadline = Number.isFinite(opts.deadline) ? opts.deadline : 0;
+  const userIsRetryable = opts.isRetryable;
+  return withRetry(() => fetchOnce(url, params, opts.timeoutMs ?? FETCH_TIMEOUT_MS), {
+    ...opts,
+    isRetryable: (err) => {
+      if (deadline && Date.now() >= deadline) return false; // 整轮预算用完：这次失败就此打住
+      return typeof userIsRetryable === "function" ? userIsRetryable(err) : isRetryableError(err);
+    },
+    onRetry: ({ attempt, attempts, delayMs, error }) => {
+      // 日志里不带 query（详情 URL 含报告 ID）：排障够用，又不把标识写进日志
+      console.warn(
+        `[scraper] ${url.split("?")[0]} 第 ${attempt}/${attempts} 次失败：${error?.message || error}；${Math.round(delayMs)}ms 后重试`
+      );
+      if (typeof opts.onRetry === "function") opts.onRetry({ attempt, attempts, delayMs, error });
+    },
+  });
 }
 
 function stripTags(s) {
@@ -176,12 +239,13 @@ async function md5Hex(text) {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/* ---------- 抓取入口 ---------- */
-export async function scrapeAll(base, pid) {
+/* ---------- 抓取入口 ----------
+ * opts 会透传给 fetchText（重试次数、退避参数、timeoutMs、sleep 等），测试里用它把等待压缩掉。 */
+export async function scrapeAll(base, pid, opts = {}) {
   const b = base.endsWith("/") ? base : base + "/";
-  const labPage = await fetchText(b + "Jianyanlist.asp", { pid });
+  const labPage = await fetchText(b + "Jianyanlist.asp", { pid }, opts);
   const labList = parseLabList(labPage);
-  const usPage = await fetchText(b + "Bbaogaolist_zy.asp", { username: pid });
+  const usPage = await fetchText(b + "Bbaogaolist_zy.asp", { username: pid }, opts);
   const usList = parseUsList(usPage);
   for (const u of usList) {
     u.uid = "US" + (await md5Hex(u.report_time + u.findings)).slice(0, 10);
@@ -197,10 +261,12 @@ export async function scrapeAll(base, pid) {
  *   - items 非空            → 正常解析
  *   - items 为空 & noDetail → 医院网页端本就不提供明细（占位页），属"已知无数据"，不该重试
  *   - items 为空 & !noDetail→ 页面拿到但没解析出内容（结构变化/临时故障），回调方应重试
+ * 说明：连接层面的临时故障（超时/5xx/读流中断）已在 fetchText 内部退避重试过了，
+ * 能走到这里的都是"真的拿到了页面"，所以上面这条判断是准的。
  */
-export async function scrapeLabDetail(base, id) {
+export async function scrapeLabDetail(base, id, opts = {}) {
   const b = base.endsWith("/") ? base : base + "/";
-  const page = await fetchText(b + "bh.asp?id=" + encodeURIComponent(id));
+  const page = await fetchText(b + "bh.asp?id=" + encodeURIComponent(id), null, opts);
   const items = parseLabDetail(page);
   return { items, noDetail: items.length === 0 && NO_DETAIL_MARK.test(page) };
 }
