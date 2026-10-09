@@ -80,6 +80,32 @@ function retryDelayMs(attempt, rnd) {
   return Math.round(base * (0.75 + 0.5 * r));
 }
 
+/* ---------- 刷新轮次（新报告分批 + 失败明细回头重试）----------
+ * 服务端把"明细没抓到"的报告留在 pending（不入库，避免空明细被永久归档），下一轮请求会重新抓它。
+ * 但日常增量只有 1~8 份新报告，一轮就抓完 → has_more 直接是 false。若此时还有失败明细就不管了，
+ * 用户只能看见"下次刷新会自动重试"，得手动再点一次按钮——所以这里补上轮级重试：
+ * 「没有新报告了，但还有明细没抓到」时自动再发一轮，直到上限。
+ * 有界是硬要求：医院那边一直不通时，绝不能让页面无限转圈。 */
+const MAX_REFRESH_ROUNDS = 12; // 新报告分批抓取的轮数上限（原 for round<=12）
+const MAX_DETAIL_RETRY_ROUNDS = 3; // 明细抓取失败后的自动重试轮数上限
+
+/* 重试轮之间的等待：默认真实等待，测试里用 __setRefreshSleep 换成"立即返回"，不拖慢测试 */
+let refreshSleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+/* 一轮结束后的下一步：more（还有新报告）/ retry_failed（回头重试没抓到的明细）/ stop。
+   抽成纯函数是为了能在 Node 测试里直接断言——浏览器里"点按钮"的流程在测试桩件里跑不起来。 */
+function nextRefreshStep(state = {}) {
+  const {
+    hasMore = false, failedCount = 0, rounds = 1, detailRetryRounds = 0,
+    maxRounds = MAX_REFRESH_ROUNDS, maxDetailRetryRounds = MAX_DETAIL_RETRY_ROUNDS,
+  } = state;
+  // 还有没抓完的新报告优先：失败项混在 pending 里，下一轮本来就会重新抓到它们
+  if (hasMore) return rounds < maxRounds ? "more" : "stop";
+  // 新报告抓完了，但这一轮有明细没抓到 → 自动回头重试（最多 maxDetailRetryRounds 轮）
+  if (failedCount > 0 && detailRetryRounds < maxDetailRetryRounds) return "retry_failed";
+  return "stop";
+}
+
 /* fetch + 自动重试 → { status, json }。网络异常 / 5xx / 429 / 响应体截断都会重试；
  * isFatal(json) 命中时立刻返回给调用方（不再白等）。sleep 可注入，便于测试。 */
 async function fetchJsonRetry(url, init, opts = {}) {
@@ -606,12 +632,27 @@ $("btn-refresh").addEventListener("click", async () => {
   };
   try {
     // 分批抓取：每轮 8 份（服务端单轮上限 10，因为抓取带重试、要省子请求预算），抓到多少显示多少，边抓边看
-    const acc = { new_lab_count: 0, new_us_count: 0, new_labs: [], new_us: [], failed_details: [], no_detail_labs: [], republished: [], latest: null };
+    const acc = { new_lab_count: 0, new_us_count: 0, new_labs: [], new_us: [], no_detail_labs: [], republished: [], latest: null };
+    /* 明细没抓到的报告按 id 记账：跨轮去重，哪一轮归档成功就从这里移出。
+       服务端不会重复抓已入库的，所以这份记账就是"还欠哪几份"的唯一真相。 */
+    const failedById = new Map();
     let totalNew = null;
     let lastHasMore = false;
     let lastTimeout = false;
-    for (let round = 1; round <= 12; round++) {
-      pText.textContent = round === 1 ? "正在连接医院查询系统，获取报告列表…" : `第 ${round} 轮：继续抓取报告明细…`;
+    let detailRetryRounds = 0; // 已用掉的失败重试轮数
+    let nextAction = "more"; // more / retry_failed / stop，判定逻辑见 nextRefreshStep
+    for (let rounds = 1; ; rounds++) {
+      const isRetryRound = nextAction === "retry_failed";
+      if (isRetryRound) {
+        // 新报告抓完了但还有明细没抓到：先退避一下再发一轮，别把失败的报告按原样立刻再打一遍
+        const delayMs = retryDelayMs(detailRetryRounds);
+        pText.textContent = `有 ${failedById.size} 份报告明细没抓到，${(delayMs / 1000).toFixed(1)} 秒后自动重试（第 ${detailRetryRounds}/${MAX_DETAIL_RETRY_ROUNDS} 次）…`;
+        logLine(`<span class="warn">↻ ${failedById.size} 份明细抓取失败，自动重试（第 ${detailRetryRounds}/${MAX_DETAIL_RETRY_ROUNDS} 次）</span>`);
+        await refreshSleep(delayMs);
+      } else {
+        pText.textContent = rounds === 1 ? "正在连接医院查询系统，获取报告列表…" : `第 ${rounds} 轮：继续抓取报告明细…`;
+      }
+      const wasFailed = new Set(failedById.keys()); // 发请求前的"欠账"快照：用来识别哪份重试成功了
       // 医院网络不稳自动重试（指数退避）：服务端按"已入库"去重，重复请求无副作用
       const { status: rStatus, json: j } = await fetchJsonRetry("/api/refresh?limit=8", { method: "POST" }, {
         // 确定性失败不重试：医院页面结构变化、缺配置、服务端自己标了 retryable:false（重试一万次也一样）
@@ -633,15 +674,22 @@ $("btn-refresh").addEventListener("click", async () => {
       for (const nl of j.new_labs || []) {
         const ab = nl.abnormal.length ? `，<span class="warn">${nl.abnormal.length} 项异常</span>` : "";
         logLine(`<span class="ok">＋ ${esc(nl.project)}</span>（${esc(String(nl.audit_time || "").replace(/\s+/g, " "))}）${ab}`);
+        if (wasFailed.has(nl.id)) logLine(`<span class="ok">↻ ${esc(nl.project)} 重试成功，已入库</span>`);
       }
-      for (const f of j.failed_details || []) logLine(`<span class="warn">✗ ${esc(f.project)} 明细抓取失败，下次自动重试</span>`);
       for (const nd of j.no_detail_labs || []) logLine(`<span class="warn">ℹ ${esc(nd.project)} 医院未公布明细，已归档（可到楼层自助机查询）</span>`);
       for (const rp of j.republished || []) logLine(`<span class="ok">↻ ${esc(rp.id)} 医院已补齐明细（${rp.item_count} 项），已更新</span>`);
+      // 先清账：已入库 / 已按"无明细"归档 / 复查补齐的，都不再算欠着
+      for (const nl of j.new_labs || []) failedById.delete(nl.id);
+      for (const nd of j.no_detail_labs || []) failedById.delete(nd.id);
+      for (const rp of j.republished || []) failedById.delete(rp.id);
+      for (const f of j.failed_details || []) {
+        failedById.set(f.id, f);
+        logLine(`<span class="warn">✗ ${esc(f.project)} 明细抓取失败${isRetryRound ? `（第 ${detailRetryRounds} 次重试仍未成功）` : "，稍后自动重试"}</span>`);
+      }
       acc.new_lab_count += j.new_lab_count || 0;
       acc.new_us_count += j.new_us_count || 0;
       acc.new_labs.push(...(j.new_labs || []));
       acc.new_us.push(...(j.new_us || []));
-      acc.failed_details.push(...(j.failed_details || []));
       acc.no_detail_labs.push(...(j.no_detail_labs || []));
       acc.republished.push(...(j.republished || []));
       acc.latest = j.latest || acc.latest;
@@ -652,7 +700,11 @@ $("btn-refresh").addEventListener("click", async () => {
         ? `已入库 ${doneCount} / ${totalNew} 份检验报告…`
         : `已入库 ${doneCount} 份检验报告…`;
       loadData().catch(() => {}); // 增量渲染：抓到的立刻上屏
-      if (!j.has_more) break;
+      /* 下一步交给纯函数判定：还有新报告 → more；新报告抓完但欠着明细 → 自动回头重试；
+         都没有 → stop。重试轮数每次 +1，所以"医院一直不通"也只会多花 3 轮，不会无限转圈。 */
+      nextAction = nextRefreshStep({ hasMore: lastHasMore, failedCount: failedById.size, rounds, detailRetryRounds });
+      if (nextAction === "retry_failed") detailRetryRounds++;
+      if (nextAction === "stop") break;
     }
     clearInterval(tick);
     pBar.style.width = "100%";
@@ -663,8 +715,9 @@ $("btn-refresh").addEventListener("click", async () => {
       sessionStorage.setItem("hc_new_us_ids", JSON.stringify(acc.new_us.map((u) => u.report_time)));
     } catch {}
 
+    const stillFailed = [...failedById.values()]; // 自动重试之后仍然没入库的那几份
     const lines = [];
-    if (acc.new_lab_count === 0 && acc.new_us_count === 0 && !acc.no_detail_labs.length) {
+    if (acc.new_lab_count === 0 && acc.new_us_count === 0 && !acc.no_detail_labs.length && !stillFailed.length) {
       lines.push("本次无新增报告，当前数据已是最新。");
     } else {
       if (acc.new_lab_count) {
@@ -680,15 +733,19 @@ $("btn-refresh").addEventListener("click", async () => {
     }
     if (acc.republished.length) lines.push("", `↻ 医院补齐了 ${acc.republished.length} 份此前无明细报告的明细，已更新归档。`);
     if (lastHasMore) lines.push("", lastTimeout ? "⚠️ 医院网络较慢，这次的 45 秒预算用完了，再点一次按钮继续。" : "⚠️ 报告较多，一次没抓完，再点一次按钮继续。");
-    if (acc.failed_details.length) {
-      lines.push("", `⚠️ ${acc.failed_details.length} 份报告明细抓取失败，下次刷新会自动重试：`);
-      for (const f of acc.failed_details) lines.push(`· ${f.project}（${f.audit_time}）`);
+    if (stillFailed.length) {
+      // 自动重试过就如实说明重试了几次：用户知道"程序已经自己试过了"，而不是以为它没管
+      lines.push("", detailRetryRounds
+        ? `⚠️ ${stillFailed.length} 份报告明细已自动重试 ${detailRetryRounds} 次仍未抓到（多为医院那头一时不通），再点一次按钮会继续重试：`
+        : `⚠️ ${stillFailed.length} 份报告明细抓取失败，再点一次按钮会继续重试：`);
+      for (const f of stillFailed) lines.push(`· ${f.project}（${f.audit_time}）`);
     }
     if (acc.latest && Object.keys(acc.latest).length) {
       lines.push("", "关键指标最新值：");
       for (const [k, v] of Object.entries(acc.latest)) lines.push(`· ${k}: ${v.value} ${v.flag || ""}（${v.date}）`);
     }
-    showStatus(lines.join("\n"), acc.failed_details.length || lastHasMore ? "" : "success");
+    // 只有失败清单时开头会剩一个空行（分隔符），去掉它
+    showStatus(lines.join("\n").replace(/^\n+/, ""), stillFailed.length || lastHasMore ? "" : "success");
     await loadData();
     setTimeout(() => { prog.hidden = true; }, 2500);
   } catch (e) {
@@ -914,4 +971,8 @@ if (typeof window === "undefined") {
   globalThis.__fetchJsonRetry = fetchJsonRetry;
   globalThis.__retryDelayMs = retryDelayMs;
   globalThis.__canShowRetryNotice = canShowRetryNotice;
+  globalThis.__nextRefreshStep = nextRefreshStep;
+  globalThis.__refreshLimits = Object.freeze({ MAX_REFRESH_ROUNDS, MAX_DETAIL_RETRY_ROUNDS });
+  // 重试轮之间的等待换成"立即返回"，否则测试要真等 0.8s+1.6s+3.2s
+  globalThis.__setRefreshSleep = (fn) => { refreshSleep = fn; };
 }

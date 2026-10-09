@@ -1,7 +1,8 @@
 /**
  * /api/refresh 端到端测试：内存 D1 桩件 + 桩 fetch，直接跑真实的 onRequestPost。
  * 覆盖：增量归档、无明细归档、结构变化预警、limit 分批，
- * 以及"医院网络抖动自动重试"（详情先失败一次，重试后仍能入库）。
+ * 以及"医院网络抖动自动重试"（详情先失败一次，重试后仍能入库）、
+ * "明细持续失败的那份不入库、下一轮仍是 pending 会被重抓"（前端轮级自动重试依赖这条契约）。
  *
  * 桩 fetch 返回的字节取自 test/fixtures/*.gbk.html：医院站是 GBK，
  * 用真实 GBK 字节快照才能顺带验证 scraper 的 gb18030 解码路径
@@ -209,9 +210,16 @@ try {
   {
     const { json: j, paths: p } = await run({ fetch: { detailStatus: { [ID1]: 503 } } });
     eq([j.ok, j.new_lab_count], [true, 1], "一份详情持续失败不影响另一份入库");
-    eq(j.failed_details.map((f) => f.id), [ID1], "失败的那份进 failed_details（前端会提示下次自动重试）");
+    eq(j.failed_details.map((f) => f.id), [ID1], "失败的那份进 failed_details（前端据此自动回头重试）");
     eq(p.filter((u) => u.includes(ID1)).length, 3, "失败那份尝试了 3 次");
     eq(labRows().map((r) => r.id), [ID2], "D1 里只有成功的那份");
+  }
+  {
+    // 客户端轮级重试（app.js 里 has_more 为 false 但 failed_details 非空时自动再发一轮）依赖的契约：
+    // 失败的报告故意不入库，所以它下一轮仍是 pending，会被重新抓到 → 网络恢复后自动补齐，不需要人工干预
+    const { json: j } = await run();
+    eq([j.new_lab_count, j.failed_details.length], [1, 0], "上一轮失败的报告仍是 pending，下一轮重抓后入库");
+    eq(labRows().map((r) => r.id).sort(), [ID1, ID2].sort(), "重抓后两份明细都在 D1 里（不重复、不丢）");
   }
 
   /* ---------- 6) 医院"不提供明细"占位页：归档但不反复重试 ---------- */

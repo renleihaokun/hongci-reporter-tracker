@@ -16,10 +16,13 @@ function makeEl(id) {
     hidden: false,
     disabled: false,
     className: "",
+    style: {},
     _attrs: {},
+    _listeners: {},
     appendChild(c) { this.children.push(c); },
     append() {},
-    addEventListener() {},
+    // 记下监听器：刷新按钮的"失败明细自动重试"流程要在测试里真的跑一遍
+    addEventListener(type, fn) { this._listeners[type] = fn; },
     setAttribute(k, v) { this._attrs[k] = String(v); },
     getAttribute(k) { return k in this._attrs ? this._attrs[k] : null; },
   };
@@ -318,6 +321,101 @@ check(els["us-title"].hidden === false, "超声标题显示");
       check(canShow("") === false, "刷新进行中 → 重试提示走进度区，不抢状态栏");
       els["btn-refresh"].disabled = false;
       els["status"].textContent = "";
+    }
+  }
+}
+
+// ---- 失败明细的自动重试（轮级重试）----
+// 回归：拿到新报告列表但明细抓取失败时，旧逻辑直接 break（has_more 为 false），
+// 只在状态栏写"下次刷新会自动重试"，用户得手动再点一次。现在应当自动再发一轮。
+{
+  const step = globalThis.__nextRefreshStep;
+  const limits = globalThis.__refreshLimits;
+  const setSleep = globalThis.__setRefreshSleep;
+  if (typeof step !== "function" || typeof setSleep !== "function" || !limits) {
+    console.log("FAIL: 轮级重试钩子未暴露"); fail++;
+  } else {
+    const MAXR = limits.MAX_DETAIL_RETRY_ROUNDS;
+    check(limits.MAX_REFRESH_ROUNDS === 12 && MAXR >= 1, `轮数上限存在（新报告 ${limits.MAX_REFRESH_ROUNDS} 轮 / 失败重试 ${MAXR} 轮）`);
+    check(step({ hasMore: false, failedCount: 2, rounds: 1, detailRetryRounds: 0 }) === "retry_failed", "有失败明细且没有新报告 → 自动回头重试");
+    check(step({ hasMore: true, failedCount: 2, rounds: 1 }) === "more", "还有新报告时先继续抓（失败项混在 pending 里，下一轮自然会被重抓）");
+    check(step({ hasMore: false, failedCount: 0 }) === "stop", "没有新报告也没有失败 → 收工");
+    check(step({ hasMore: false, failedCount: 1, detailRetryRounds: MAXR }) === "stop", "重试轮数用尽 → 收工（不会无限重试）");
+    check(step({ hasMore: false, failedCount: 1, detailRetryRounds: MAXR - 1 }) === "retry_failed", "上限内的最后一次重试仍会执行");
+    check(step({ hasMore: true, rounds: limits.MAX_REFRESH_ROUNDS }) === "stop", "新报告轮数用尽 → 收工（12 轮上限语义不变）");
+
+    // 端到端：真的"点"一次刷新按钮，用脚本化 fetch 注入失败
+    const realFetch = globalThis.fetch;
+    const sleepMs = [];
+    setSleep((ms) => { sleepMs.push(ms); });
+    const FAIL1 = {
+      ok: true, has_more: false, new_lab_count: 0, new_us_count: 0, new_labs: [], new_us: [],
+      failed_details: [{ id: "FAKE1", project: "血常规", audit_time: "2026/10/9 9:00:00" }],
+      no_detail_labs: [], republished: [], latest: {},
+    };
+    const OK1 = {
+      ok: true, has_more: false, new_lab_count: 1, new_us_count: 0, new_us: [], failed_details: [],
+      new_labs: [{ id: "FAKE1", project: "血常规", audit_time: "2026/10/9 9:00:00", abnormal: [] }],
+      no_detail_labs: [], republished: [], latest: {},
+    };
+    const IDLE = { ...OK1, new_lab_count: 0, new_labs: [] };
+
+    const drive = async (script) => {
+      let n = 0;
+      globalThis.fetch = async (url) => {
+        const u = String(url);
+        if (u.startsWith("/api/refresh")) {
+          const body = n < script.length ? script[n] : IDLE; // 脚本用尽后回一个"无事发生"，超发请求会在计数断言里露出来
+          n++;
+          return { status: 200, json: async () => body };
+        }
+        if (u === "/api/data") return { status: 200, json: async () => sample };
+        throw new Error("unexpected fetch: " + u);
+      };
+      sleepMs.length = 0;
+      els["prog-log"].children = [];
+      els["status"].textContent = "";
+      els["status"].className = "status";
+      await els["btn-refresh"]._listeners.click();
+      return {
+        refreshCalls: n,
+        log: els["prog-log"].children.map((c) => c.innerHTML).join("\n"),
+        status: els["status"].textContent,
+        statusClass: els["status"].className,
+        btnDisabled: els["btn-refresh"].disabled,
+      };
+    };
+
+    try {
+      // A) 第一轮明细失败，第二轮（自动重试）拿到 → 不该停在失败上
+      {
+        const r = await drive([FAIL1, OK1]);
+        check(r.refreshCalls === 2, `明细失败后自动再发一轮（/api/refresh 共 2 次，实为 ${r.refreshCalls}）`);
+        check(r.log.includes("自动重试") && r.log.includes("重试成功，已入库"), "进度区显示自动重试与重试成功");
+        check(!r.status.includes("抓取失败") && !r.status.includes("仍未抓到"), "重试成功后状态栏不再报失败");
+        check(r.statusClass.includes("success"), "全部入库 → 状态栏标 success");
+        check(sleepMs.length === 1 && sleepMs[0] >= 600 && sleepMs[0] <= 1000, `重试轮之间退避一次（${sleepMs[0]}ms，±25% 抖动）`);
+        check(r.btnDisabled === false, "结束后按钮恢复可点");
+      }
+      // B) 医院一直不通：只重试上限轮数就收工，如实告知重试过几次
+      {
+        const r = await drive([FAIL1, FAIL1, FAIL1, FAIL1, IDLE]);
+        check(r.refreshCalls === 1 + MAXR, `持续失败只重试 ${MAXR} 轮（/api/refresh 共 ${r.refreshCalls} 次）`);
+        check(r.status.includes(`已自动重试 ${MAXR} 次仍未抓到`) && r.status.includes("血常规"), "状态栏说明已重试次数并列出没抓到的报告");
+        check(!r.statusClass.includes("success"), "仍有报告没入库 → 不标 success");
+        check(sleepMs.length === MAXR && sleepMs.every((ms) => ms >= 600 && ms <= 4000), `每轮重试都退避(${sleepMs.join("ms/")}ms)`);
+        check(r.btnDisabled === false, "放弃自动重试后按钮仍可点，用户可手动再试");
+      }
+      // C) has_more 仍然驱动多轮抓取，且失败重试不会抢在它前面
+      {
+        const r = await drive([{ ...FAIL1, has_more: true }, OK1]);
+        check(r.refreshCalls === 2, "还有新报告时照旧继续抓下一轮");
+        check(sleepMs.length === 0, "has_more 轮之间不额外等待（退避只用于失败重试轮）");
+        check(r.statusClass.includes("success"), "后续轮补齐后同样是成功收尾");
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+      setSleep((ms) => new Promise((res) => setTimeout(res, ms)));
     }
   }
 }
