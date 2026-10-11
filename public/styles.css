@@ -168,12 +168,53 @@ body {
 .sec-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 22px 0 10px; }
 .sec-head h2 { font-size: 17px; margin: 0; padding-left: 10px; border-left: 4px solid var(--blue); }
 h2:not(.sec-head h2) { margin: 22px 0 10px; font-size: 17px; padding-left: 10px; border-left: 4px solid var(--blue); }
+.sec-actions { display: flex; align-items: center; gap: 6px; }
 .mini-btn {
   flex: none; border: 1.5px solid var(--blue); color: var(--blue); background: var(--card);
   border-radius: 999px; padding: 6px 13px; font-size: 13px; font-weight: 600; cursor: pointer;
   box-shadow: var(--shadow-sm); transition: transform .06s;
 }
 .mini-btn:active { transform: scale(.95); }
+
+/* ================= 报告筛选胶囊 ================= */
+.filter-tabs {
+  display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; margin: 4px 0 12px;
+  scrollbar-width: none; -webkit-overflow-scrolling: touch;
+}
+.filter-tabs::-webkit-scrollbar { display: none; }
+.ftab {
+  flex: none; border: 1.5px solid var(--line); background: var(--card); color: var(--sub);
+  border-radius: 999px; padding: 5px 13px; font-size: 12.5px; font-weight: 600; cursor: pointer;
+  transition: all .15s ease;
+}
+.ftab:hover { color: var(--blue); border-color: var(--blue); }
+.ftab.on {
+  background: var(--blue); color: #fff; border-color: var(--blue);
+  box-shadow: 0 2px 8px rgba(62, 123, 250, .25);
+}
+
+/* ================= 最新异常速览卡片 ================= */
+.abn-card {
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--card), var(--chip));
+  margin-bottom: 14px;
+}
+.abn-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.abn-title { font-size: 15px; font-weight: 700; color: var(--red); display: flex; align-items: center; gap: 5px; }
+.abn-tip { font-size: 12px; color: var(--sub); }
+.abn-pills { display: flex; flex-wrap: wrap; gap: 8px; }
+.abn-pill {
+  display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; border-radius: 999px;
+  font-size: 12.5px; cursor: pointer; border: 1px solid transparent; text-decoration: none;
+  transition: transform .08s ease, filter .15s ease;
+}
+.abn-pill:hover { filter: brightness(.95); transform: translateY(-1px); }
+.abn-pill:active { transform: scale(.96); }
+.abn-pill.hi { background: var(--hi-bg); color: var(--hi-tx); border-color: rgba(224, 49, 49, .22); font-weight: 600; }
+.abn-pill.lo { background: var(--lo-bg); color: var(--lo-tx); border-color: rgba(28, 126, 214, .22); font-weight: 600; }
+.abn-pill .abn-proj { font-size: 11px; opacity: .8; font-weight: normal; }
+.abn-pill .abn-val { font-variant-numeric: tabular-nums; }
+
 
 /* ================= 趋势卡片 ================= */
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
@@ -201,8 +242,22 @@ h2:not(.sec-head h2) { margin: 22px 0 10px; font-size: 17px; padding-left: 10px;
 
 /* ================= 添加指标面板 ================= */
 .mpanel { border: 1.5px dashed var(--line); box-shadow: none; }
-.mp-head { font-size: 14px; font-weight: 700; margin-bottom: 10px; }
-.mp-sub { font-size: 12px; font-weight: 400; color: var(--sub); margin-left: 6px; }
+.mp-head { font-size: 14px; font-weight: 700; margin-bottom: 8px; display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 6px; }
+.mp-sub { font-size: 12px; font-weight: 400; color: var(--sub); }
+.mp-reset-btn {
+  border: none; background: transparent; color: var(--blue); font-size: 12px;
+  cursor: pointer; padding: 2px 6px; border-radius: 6px; font-weight: 500;
+}
+.mp-reset-btn:hover { text-decoration: underline; background: var(--chip); }
+.mp-cat-bar { display: flex; gap: 6px; overflow-x: auto; margin-bottom: 8px; scrollbar-width: none; }
+.mp-cat-bar::-webkit-scrollbar { display: none; }
+.mp-cat {
+  flex: none; border: 1px solid var(--line); background: var(--bg); color: var(--sub);
+  border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: 600; cursor: pointer;
+  transition: all .12s;
+}
+.mp-cat:hover { color: var(--blue); }
+.mp-cat.on { background: var(--blue); color: #fff; border-color: var(--blue); }
 .mp-row {
   display: flex; align-items: center; gap: 10px; padding: 10px 10px; border-radius: 12px;
   cursor: pointer; font-size: 14px; transition: background .12s;
@@ -269,6 +324,11 @@ tr.lnk:hover td { background: var(--lo-bg); }
 @keyframes flashPulse {
   0%, 100% { box-shadow: var(--shadow); }
   20%, 60% { box-shadow: 0 0 0 3px var(--blue), var(--shadow); }
+}
+tr.row-flash td { animation: rowFlash 2s ease; }
+@keyframes rowFlash {
+  0%, 100% { background: inherit; }
+  20%, 60% { background: rgba(255, 135, 135, .45) !important; }
 }
 
 /* ================= AI 解读指引卡 ================= */
@@ -403,4 +463,36 @@ tr.lnk:hover td { background: var(--lo-bg); }
   .hc-m-stats { grid-template-columns: repeat(5, 1fr); gap: 5px; }
   .hc-chip b { font-size: 12.5px; }
   .card { padding: 14px 14px; }
+}
+
+/* ================= 打印与病程导出适配 ================= */
+@media print {
+  body { background: #fff !important; color: #000 !important; font-size: 10pt; }
+  .topbar {
+    position: static; background: #fff !important; color: #000 !important;
+    box-shadow: none !important; border-bottom: 2px solid #222; padding: 10px 0;
+  }
+  .topbar h1 { color: #000 !important; font-size: 18pt; }
+  .topbar .sub { color: #555 !important; }
+  .logout, .actions, .mini-btn, .filter-tabs, .zoom-hint, .tr-lnk,
+  .mp-cat-bar, .mp-filter, .mp-more, .mp-reset-btn,
+  #btn-metrics, #mpanel, #progress, #status, #ai-box, .hc-modal-mask {
+    display: none !important;
+  }
+  .card {
+    box-shadow: none !important; border: 1px solid #ccc !important;
+    background: #fff !important; break-inside: avoid; margin-bottom: 12px;
+  }
+  .hero { background: #fff !important; }
+  details { display: block !important; }
+  details > summary { display: block !important; border-bottom: 1px solid #ddd; }
+  details > summary .arrow { display: none !important; }
+  details > .detail-body { display: block !important; }
+  table { font-size: 8.5pt; width: 100%; }
+  th, td { border: 1px solid #ccc; padding: 3px 5px; }
+  tr.abn td {
+    background: #fee !important;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  .foot { border-top: 1px solid #ddd; margin-top: 20px; font-size: 8pt; }
 }

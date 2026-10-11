@@ -70,9 +70,17 @@
     <div class="ai-note">提示词仅含检验数值与报告类型，不含姓名、住院号；粘贴给 DeepSeek 即表示你同意其处理这些数据。</div>
   </div>
 
+  <section class="card abn-card" id="abn-card" hidden>
+    <div class="abn-head">
+      <div class="abn-title">⚠️ <span id="abn-title">最新检验异常</span></div>
+      <div class="abn-tip">点击快速定位报告</div>
+    </div>
+    <div class="abn-pills" id="abn-pills"></div>
+  </section>
+
   <div class="sec-head">
     <h2>关键指标趋势</h2>
-    <button id="btn-metrics" class="mini-btn" hidden>＋ 添加指标</button>
+    <button id="btn-metrics" class="mini-btn">＋ 添加指标</button>
   </div>
   <div id="mpanel" class="card mpanel" hidden></div>
   <div class="grid" id="trends">
@@ -83,7 +91,18 @@
 
   <div class="sec-head">
     <h2>检验报告</h2>
-    <button id="btn-csv" class="mini-btn">⬇ 导出 CSV</button>
+    <div class="sec-actions">
+      <button id="btn-toggle-labs" class="mini-btn" type="button">折叠全部</button>
+      <button id="btn-csv" class="mini-btn">⬇ 导出 CSV</button>
+    </div>
+  </div>
+  <div class="filter-tabs" id="lab-filters" hidden>
+    <button class="ftab on" data-f="all">全部</button>
+    <button class="ftab" data-f="abn">仅异常</button>
+    <button class="ftab" data-f="blood">血常规</button>
+    <button class="ftab" data-f="biochem">生化/功能</button>
+    <button class="ftab" data-f="fluid">体液</button>
+    <button class="ftab" data-f="other">其他</button>
   </div>
   <div id="labs">
     <div class="card skel skel-rep"></div>

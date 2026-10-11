@@ -35,6 +35,7 @@ for (const id of [
   "stat-labs", "stat-us", "stat-abn", "stat-days",
   "progress", "prog-text", "prog-log", "prog-bar", "prog-time",
   "btn-metrics", "mpanel", "btn-csv",
+  "abn-card", "abn-pills", "abn-title", "btn-toggle-labs", "lab-filters",
 ]) {
   els[id] = makeEl(id);
 }
@@ -157,6 +158,11 @@ check(els["us-title"].hidden === false, "超声标题显示");
     check(p.split("88.0").length - 1 === 1, "尿沉渣数值仅作为异常项出现一次");
     check(p.includes("请以主治医生解读为准"), "提示词含免责约束");
     check(!/姓名|住院号|张三/.test(p), "提示词不含隐私字段");
+    // 验证不传时间参数时，能够自动以归档中最新报告日期为锚点提取近14天数据（历史报告不丢失）
+    const pNoTime = build(sample);
+    check(pNoTime.includes("2.10"), "不传时间参数默认以最新归档日期为锚点");
+    const pSeriesSec = (pNoTime.split("【近14天关键指标】")[1] || "").split("【最近一天异常项目】")[0];
+    check(pSeriesSec.includes("09-20=2.10↓"), "历史归档下近14天指标序列仍完整提取");
   }
 }
 
@@ -223,7 +229,32 @@ check(els["us-title"].hidden === false, "超声标题显示");
     const searched = pick(list, "钾测定", false);
     check(searched.shown.length === 26 && searched.folding === false, "筛选跨全部候选搜索(26 项命中)且不再折叠");
     check(pick(list, "不存在的项目", false).shown.length === 0, "无命中时返回空列表");
+    const catList = list.map((it, i) => ({ ...it, cat: i % 2 ? "blood" : "fluid", tag: i % 2 ? "血常规" : "体液" }));
+    const catFiltered = pick(catList, "", false, 10, "blood");
+    check(catFiltered.shown.every((it) => it.cat === "blood") && catFiltered.shown.length === 26, "分类筛选仅保留目标类别候选(26项)");
   }
+}
+
+// ---- 报告分类与筛选功能 ----
+{
+  const filter = globalThis.__filterLabs;
+  const catOf = globalThis.__reportCatOf;
+  check(catOf({ project: "全血细胞分析" }) === "blood", "全血细胞分析归类血常规");
+  check(catOf({ project: "尿常规+尿沉渣" }) === "fluid", "尿常规归类体液");
+  check(catOf({ project: "肝功能+肾功能+血脂四项" }) === "biochem", "肝肾功能归类生化");
+  check(catOf({ project: "超声心动图" }) === "other", "其他归类other");
+  const abnOnly = filter(sample.lab_reports, "abn");
+  check(abnOnly.length > 0 && abnOnly.every((r) => (r.items || []).some((i) => i.flag === "↑" || i.flag === "↓")), "仅异常过滤正确");
+  const bloodOnly = filter(sample.lab_reports, "blood");
+  check(bloodOnly.every((r) => catOf(r) === "blood"), "血常规类别过滤正确");
+}
+
+// ---- 最新异常速览卡片 ----
+{
+  globalThis.__renderAll(sample);
+  check(els["abn-card"].hidden === false, "最新异常卡片正常显示");
+  check(els["abn-pills"].innerHTML.includes("尿沉渣"), "最新异常包含尿沉渣异常项");
+  check(els["abn-title"].textContent.includes("最新检验异常"), "异常卡片标题含最新日期与项数");
 }
 
 // ---- 客户端网络重试（指数退避）----

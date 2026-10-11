@@ -9,8 +9,20 @@
    白名单失效表现为图变空白（显性），黑名单漏排会静默混入脏数据（隐性），故血指标用白名单。 */
 const BLOOD_PANEL_RE = /血常规|血细胞分析|全血细胞/;
 const FLUID_PANEL_RE = /尿|粪|便|大便|胸水|腹水|脑脊液|分泌物|痰|前列腺|灌洗|胃液|胆汁/;
+const BIOCHEM_PANEL_RE = /生化|肝功能|肾功能|血脂|电解质|葡萄糖|蛋白|酶|肌酸|甘胆酸|二氧化碳|离子/;
 const bloodMetric = (match) => (rep, it) => BLOOD_PANEL_RE.test(rep.project || "") && match(String(it.name || ""));
 const serumMetric = (match) => (rep, it) => !FLUID_PANEL_RE.test(rep.project || "") && match(String(it.name || ""));
+
+/* 报告分类：用于报告列表快速筛选与统计 */
+function reportCatOf(rep) {
+  const p = rep?.project || "";
+  if (BLOOD_PANEL_RE.test(p)) return "blood";
+  if (FLUID_PANEL_RE.test(p)) return "fluid";
+  if (BIOCHEM_PANEL_RE.test(p)) return "biochem";
+  return "other";
+}
+let CURRENT_LAB_FILTER = "all";
+let LABS_EXPANDED = false;
 
 /* 核心指标（默认置顶）。panel: blood=只在血常规类报告取数；serum=排除体液类报告。
    cover(name, cat) 与 match(rep, it) 语义等价，供自动发现去重与报告行反查使用。 */
@@ -246,7 +258,7 @@ function discoverSeries(labs) {
     if (g.reportIds.size < DISCO_MIN_REPORTS) continue;
     if (g.pts.length < DISCO_MIN_REPORTS || g.pts.length < g.total * 0.5) continue;
     if (CORE_DEFS.some((d) => d.cover(g.name, g.cat))) continue; // 核心指标已覆盖
-    out.push({ key: g.key, label: g.name, tag: CAT_LABEL[g.cat], pts: g.pts, ref: latestRef(g.pts), count: g.reportIds.size });
+    out.push({ key: g.key, label: g.name, tag: CAT_LABEL[g.cat], cat: g.cat, pts: g.pts, ref: latestRef(g.pts), count: g.reportIds.size });
   }
   out.sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, "zh-CN"));
   return out;
@@ -272,21 +284,25 @@ function saveVisPref(keys) {
 let SERIES_CACHE = new Map(); // key -> series
 let DISCO_LIST = [];          // 发现的候选（含未选中的）
 
-/* 添加指标面板的 UI 状态（重渲染后保持：折叠/展开、筛选词） */
+/* 添加指标面板的 UI 状态（重渲染后保持：折叠/展开、筛选词、分类） */
 const MP_PREVIEW = 10;
-const MP_STATE = { expanded: false, q: "" };
+const MP_STATE = { expanded: false, q: "", cat: "all" };
 let MP_VIS_KEYS = new Set();
 
-/* 纯函数：按筛选词取待显示行。筛选时跨全部候选搜索并跳过折叠（否则搜不到被折叠的项）。 */
-function mpPickRows(ordered, q, expanded, limit = MP_PREVIEW) {
+/* 纯函数：按筛选词与分类取待显示行。筛选时跨全部候选搜索并跳过折叠（否则搜不到被折叠的项）。 */
+function mpPickRows(ordered, q, expanded, limit = MP_PREVIEW, cat = "all") {
+  let matched = ordered;
+  if (cat && cat !== "all") {
+    matched = matched.filter((s) => s.cat === cat || s.tag === CAT_LABEL[cat]);
+  }
   const kw = String(q || "").trim().toLowerCase();
-  const matched = kw ? ordered.filter((s) => s.label.toLowerCase().includes(kw)) : ordered;
-  const folding = !kw && matched.length > limit;
-  const shown = expanded || kw ? matched : matched.slice(0, limit);
+  if (kw) matched = matched.filter((s) => s.label.toLowerCase().includes(kw));
+  const folding = !kw && (cat === "all") && matched.length > limit;
+  const shown = expanded || kw || (cat !== "all") ? matched : matched.slice(0, limit);
   return { shown, matched, folding };
 }
 
-/* 真实数据动辄 50+ 个候选项目，故：筛选框（跨全部候选搜索）+ 默认只列前 10 项 + 展开全部。
+/* 真实数据动辄 50+ 个候选项目，故：筛选框（跨全部候选搜索）+ 分类快捷按钮 + 默认只列前 10 项 + 展开全部。
    排序把"已选中"顶到最前——用户真正关心的项目永远第一眼可见。 */
 function renderMetricPanel() {
   const panel = $("mpanel");
@@ -307,20 +323,31 @@ function renderMetricPanel() {
       `</div>`;
   };
   const nSel = ordered.filter((s) => visKeys.has(s.key)).length;
+  const isCustom = Boolean(loadVisPref());
   const head =
-    `<div class="mp-head">自动发现 ${DISCO_LIST.length} 个长期监测项目` +
-    `<span class="mp-sub">点选加入/移出趋势区（已选 ${nSel} 项），选择会自动记住</span></div>`;
+    `<div class="mp-head">` +
+    `<div>自动发现 ${DISCO_LIST.length} 个长期监测项目 <span class="mp-sub">已选 ${nSel} 项</span></div>` +
+    (isCustom ? `<button class="mp-reset-btn" id="mp-reset" type="button">恢复默认推荐</button>` : "") +
+    `</div>`;
 
-  const { shown, matched, folding } = mpPickRows(ordered, MP_STATE.q, MP_STATE.expanded);
+  const catBtns = [
+    ["all", "全部"],
+    ["blood", "血常规"],
+    ["fluid", "体液"],
+    ["other", "其他"],
+  ].map(([c, lbl]) => `<button type="button" class="mp-cat${(MP_STATE.cat || "all") === c ? " on" : ""}" data-cat="${c}">${lbl}</button>`).join("");
+
+  const { shown, matched, folding } = mpPickRows(ordered, MP_STATE.q, MP_STATE.expanded, MP_PREVIEW, MP_STATE.cat);
 
   panel.innerHTML =
     head +
     (DISCO_LIST.length > 6
-      ? `<input id="mp-filter" class="mp-filter" type="search" placeholder="筛选项目名，如 钾 / 红细胞 / 胆红素" value="${esc(MP_STATE.q)}">`
+      ? `<input id="mp-filter" class="mp-filter" type="search" placeholder="筛选项目名，如 钾 / 红细胞 / 胆红素" value="${esc(MP_STATE.q)}">` +
+        `<div class="mp-cat-bar">${catBtns}</div>`
       : "") +
     (shown.length
       ? shown.map(rowHtml).join("")
-      : `<div class="mp-empty">没有匹配「${esc(MP_STATE.q)}」的项目</div>`) +
+      : `<div class="mp-empty">没有匹配${MP_STATE.q ? `「${esc(MP_STATE.q)}」` : ""}的项目</div>`) +
     (folding
       ? `<button class="mp-more" type="button">${MP_STATE.expanded ? "收起 ▲" : `展开全部 ${matched.length} 项 ▼`}</button>`
       : "");
@@ -459,16 +486,105 @@ function renderTrends(labs) {
 }
 
 /* ---------- 报告溯源跳转 ---------- */
-function jumpToReport(repId) {
+function jumpToReport(repId, itemName) {
   if (typeof HCChart !== "undefined" && HCChart.close) HCChart.close();
   const el = document.getElementById("rep-" + repId);
   if (!el) return;
   const det = el.querySelector ? el.querySelector("details") : null;
   if (det) det.open = true;
+  if (itemName) {
+    const rows = el.querySelectorAll ? el.querySelectorAll("tr") : [];
+    let targetRow = null;
+    for (const r of rows) {
+      if (r.textContent && r.textContent.includes(itemName)) { targetRow = r; break; }
+    }
+    if (targetRow) {
+      if (targetRow.scrollIntoView) targetRow.scrollIntoView({ behavior: "smooth", block: "center" });
+      if (targetRow.classList) {
+        targetRow.classList.add("row-flash");
+        setTimeout(() => targetRow.classList.remove("row-flash"), 2000);
+      }
+      return;
+    }
+  }
   if (el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", block: "center" });
   if (el.classList) {
     el.classList.add("flash");
     setTimeout(() => el.classList.remove("flash"), 1800);
+  }
+}
+
+/* ---------- 最新化验异常速览 ---------- */
+function renderAbnormalSummary(labs) {
+  const card = $("abn-card");
+  const pillsEl = $("abn-pills");
+  const titleEl = $("abn-title");
+  if (!card || !pillsEl) return;
+  if (!labs.length) { card.hidden = true; return; }
+  const lastTime = Math.max(0, ...labs.map((r) => parseDt(r.audit_time)));
+  if (!lastTime) { card.hidden = true; return; }
+  // 取归档中最新一天（最后 24 小时以内）的所有报告
+  const latestReps = labs.filter((r) => parseDt(r.audit_time) >= lastTime - 864e5);
+  const items = [];
+  for (const rep of latestReps) {
+    for (const it of rep.items || []) {
+      if (it.flag === "↑" || it.flag === "↓") {
+        items.push({
+          name: it.name,
+          result: it.result,
+          flag: it.flag,
+          project: rep.project,
+          repId: rep.id,
+          cls: it.flag === "↑" ? "hi" : "lo",
+        });
+      }
+    }
+  }
+  if (!items.length) { card.hidden = true; return; }
+  card.hidden = false;
+  if (titleEl) {
+    const latestDate = dayLabel(latestReps[0]?.audit_time);
+    titleEl.textContent = `最新检验异常（${latestDate} · ${items.length}项）`;
+  }
+  pillsEl.innerHTML = items.map((it) =>
+    `<button type="button" class="abn-pill ${it.cls}" data-repid="${esc(it.repId)}" data-item="${esc(it.name)}">` +
+    `<span class="abn-proj">${esc(it.project)} · </span>` +
+    `<b>${esc(it.name)}</b> <span class="abn-val">${esc(it.result)}${esc(it.flag)}</span>` +
+    `</button>`
+  ).join("");
+}
+
+/* ---------- 报告列表过滤与分类 ---------- */
+function filterLabs(labs, f) {
+  if (f === "abn") return labs.filter((r) => (r.items || []).some((i) => i.flag === "↑" || i.flag === "↓"));
+  if (f === "blood") return labs.filter((r) => reportCatOf(r) === "blood");
+  if (f === "biochem") return labs.filter((r) => reportCatOf(r) === "biochem");
+  if (f === "fluid") return labs.filter((r) => reportCatOf(r) === "fluid");
+  if (f === "other") return labs.filter((r) => reportCatOf(r) === "other");
+  return labs;
+}
+
+function updateLabFilterCounts(labs) {
+  const bar = $("lab-filters");
+  if (!bar) return;
+  if (!labs.length) { bar.hidden = true; return; }
+  bar.hidden = false;
+  const counts = {
+    all: labs.length,
+    abn: labs.filter((r) => (r.items || []).some((i) => i.flag === "↑" || i.flag === "↓")).length,
+    blood: labs.filter((r) => reportCatOf(r) === "blood").length,
+    biochem: labs.filter((r) => reportCatOf(r) === "biochem").length,
+    fluid: labs.filter((r) => reportCatOf(r) === "fluid").length,
+    other: labs.filter((r) => reportCatOf(r) === "other").length,
+  };
+  const labels = {
+    all: "全部", abn: "仅异常", blood: "血常规", biochem: "生化/功能", fluid: "体液", other: "其他",
+  };
+  const tabs = bar.querySelectorAll ? bar.querySelectorAll(".ftab") : [];
+  for (const tab of tabs) {
+    const f = tab.getAttribute("data-f");
+    tab.textContent = `${labels[f] || f} (${counts[f] ?? 0})`;
+    tab.className = "ftab" + (f === CURRENT_LAB_FILTER ? " on" : "");
   }
 }
 
@@ -510,25 +626,37 @@ function renderAll(data) {
   $("hero-range").textContent = sortedDays.length ? `归档区间 ${sortedDays[0]} ~ ${sortedDays[sortedDays.length - 1]}` : "暂无归档数据";
   $("hero-updated").textContent = "上次更新 " + upd;
 
+  /* 最新化验异常速览 */
+  renderAbnormalSummary(labs);
+
   /* 趋势 */
   renderTrends(labs);
 
+  /* 报告过滤栏更新 */
+  updateLabFilterCounts(labs);
+  const filteredLabs = filterLabs(labs, CURRENT_LAB_FILTER);
+
   /* 检验报告按日期分组 */
   const byDay = {};
-  for (const rep of labs) {
+  for (const rep of filteredLabs) {
     const d = dayLabel(rep.audit_time);
     (byDay[d] = byDay[d] || []).push(rep);
   }
   const labsEl = $("labs");
   labsEl.innerHTML = "";
   const days = Object.keys(byDay).sort().reverse();
-  if (!days.length) labsEl.innerHTML = '<div class="card">暂无数据，点击上方"获取最新报告"</div>';
+  if (!days.length) {
+    labsEl.innerHTML = labs.length
+      ? '<div class="card">当前筛选分类下无匹配报告</div>'
+      : '<div class="card">暂无数据，点击上方"获取最新报告"</div>';
+  }
   days.forEach((day, di) => {
     const h = document.createElement("div");
     h.className = "day";
     h.textContent = day;
     labsEl.appendChild(h);
-    for (const rep of byDay[day].sort((a, b) => parseDt(b.audit_time) - parseDt(a.audit_time))) {
+    const dayReps = byDay[day].sort((a, b) => parseDt(b.audit_time) - parseDt(a.audit_time));
+    dayReps.forEach((rep, repIdx) => {
       const items = rep.items || [];
       const abn = items.filter((i) => i.flag === "↑" || i.flag === "↓");
       const tm = hmOf(rep.audit_time);
@@ -553,12 +681,13 @@ function renderAll(data) {
       const card = document.createElement("div");
       card.className = "card";
       if (rep.id) card.id = "rep-" + rep.id;
+      const shouldOpen = LABS_EXPANDED || (CURRENT_LAB_FILTER === "all" ? (di === 0 && repIdx < 2) : true);
       card.innerHTML =
-        `<details${di === 0 ? " open" : ""}><summary><span>${esc(rep.project)} · ${esc(tm)} ${tag}${isNew ? '<span class="new-tag">新</span>' : ""}</span><span class="arrow">▶</span></summary>` +
+        `<details${shouldOpen ? " open" : ""}><summary><span>${esc(rep.project)} · ${esc(tm)} ${tag}${isNew ? '<span class="new-tag">新</span>' : ""}</span><span class="arrow">▶</span></summary>` +
         `<div class="detail-body">${bodyHtml}` +
         `<div class="rep-meta">标本号 ${esc(rep.id)} · 审核 ${esc(rep.audit_time)}</div></div></details>`;
       labsEl.appendChild(card);
-    }
+    });
   });
 
   /* 超声 */
@@ -762,12 +891,15 @@ $("btn-refresh").addEventListener("click", async () => {
  * 前端已持有 /api/data 全量数据，本地构建提示词并复制到剪贴板，
  * 引导家属去 DeepSeek 网页版/App 粘贴分析，服务端零 LLM 依赖。
  * 提示词只含核心 5 项指标序列（CORE_DEFS），不随自动发现扩容，避免 prompt 膨胀。 */
-function buildAiPrompt(data, nowMs = Date.now()) {
+function buildAiPrompt(data, nowMs) {
   const defs = CORE_DEFS.map((d) => [d.label, d.match]);
   const labs = (data.lab_reports || [])
     .slice()
     .sort((a, b) => parseDt(a.audit_time) - parseDt(b.audit_time));
-  const recent = labs.filter((r) => parseDt(r.audit_time) > nowMs - 14 * 864e5);
+  const lastDay = Math.max(0, ...labs.map((r) => parseDt(r.audit_time)));
+  // 锚点优先用归档中最新报告时间（历史归档/出院后回溯仍能完整提取近14天数据）；若无报告则退回传入的 nowMs 或当前系统时间
+  const anchorMs = typeof nowMs === "number" ? nowMs : (lastDay > 0 ? lastDay : Date.now());
+  const recent = labs.filter((r) => parseDt(r.audit_time) > anchorMs - 14 * 864e5);
   const series = defs.map(([label, match]) => {
     const vals = [];
     for (const rep of recent) {
@@ -779,7 +911,6 @@ function buildAiPrompt(data, nowMs = Date.now()) {
     }
     return `${label}: ${vals.join(" → ") || "无数据"}`;
   });
-  const lastDay = Math.max(0, ...labs.map((r) => parseDt(r.audit_time)));
   const abn = [];
   for (const rep of labs.filter((r) => parseDt(r.audit_time) >= lastDay - 864e5)) {
     for (const it of rep.items || []) {
@@ -849,6 +980,32 @@ if (btnMetrics) btnMetrics.addEventListener("click", () => {
 });
 const mpanelEl = $("mpanel");
 if (mpanelEl) mpanelEl.addEventListener("click", (e) => {
+  // 恢复默认推荐
+  const rst = e.target && e.target.closest ? e.target.closest("#mp-reset") : null;
+  if (rst) {
+    if (typeof localStorage !== "undefined") localStorage.removeItem(LS_VIS_KEY);
+    const defKeys = [
+      ...CORE_DEFS.map((d) => d.key),
+      ...DISCO_LIST.slice(0, AUTO_TOP_N).map((s) => s.key),
+    ];
+    MP_VIS_KEYS = new Set(defKeys);
+    if (currentData) {
+      const labs = (currentData.lab_reports || []).slice().sort((a, b) => parseDt(a.audit_time) - parseDt(b.audit_time));
+      renderTrends(labs);
+    }
+    renderMetricPanel();
+    return;
+  }
+  // 分类切换
+  const catBtn = e.target && e.target.closest ? e.target.closest(".mp-cat") : null;
+  if (catBtn) {
+    const c = catBtn.getAttribute("data-cat");
+    if (c) {
+      MP_STATE.cat = c;
+      renderMetricPanel();
+    }
+    return;
+  }
   // 展开/收起全部（筛选时不显示该按钮）
   const more = e.target && e.target.closest ? e.target.closest(".mp-more") : null;
   if (more) {
@@ -937,6 +1094,45 @@ if (btnCsv) btnCsv.addEventListener("click", async () => {
   }
 });
 
+/* ---------- 最新化验异常速览点击联动 ---------- */
+const abnPillsEl = $("abn-pills");
+if (abnPillsEl) {
+  abnPillsEl.addEventListener("click", (e) => {
+    const btn = e.target && e.target.closest ? e.target.closest(".abn-pill") : null;
+    if (!btn) return;
+    const repId = btn.getAttribute("data-repid");
+    const item = btn.getAttribute("data-item");
+    if (repId) jumpToReport(repId, item);
+  });
+}
+
+/* ---------- 检验报告折叠/展开全部 ---------- */
+const btnToggleLabs = $("btn-toggle-labs");
+if (btnToggleLabs) {
+  btnToggleLabs.addEventListener("click", () => {
+    LABS_EXPANDED = !LABS_EXPANDED;
+    btnToggleLabs.textContent = LABS_EXPANDED ? "收起全部" : "展开全部";
+    const labsRoot = $("labs");
+    if (labsRoot && labsRoot.querySelectorAll) {
+      const allDet = labsRoot.querySelectorAll("details");
+      for (const d of allDet) d.open = LABS_EXPANDED;
+    }
+  });
+}
+
+/* ---------- 检验报告分类胶囊筛选 ---------- */
+const labFiltersBar = $("lab-filters");
+if (labFiltersBar) {
+  labFiltersBar.addEventListener("click", (e) => {
+    const tab = e.target && e.target.closest ? e.target.closest(".ftab") : null;
+    if (!tab) return;
+    const f = tab.getAttribute("data-f");
+    if (!f || f === CURRENT_LAB_FILTER) return;
+    CURRENT_LAB_FILTER = f;
+    if (currentData) renderAll(currentData);
+  });
+}
+
 $("btn-logout").addEventListener("click", async () => {
   await fetch("/api/login", { method: "DELETE" });
   location.reload();
@@ -975,4 +1171,7 @@ if (typeof window === "undefined") {
   globalThis.__refreshLimits = Object.freeze({ MAX_REFRESH_ROUNDS, MAX_DETAIL_RETRY_ROUNDS });
   // 重试轮之间的等待换成"立即返回"，否则测试要真等 0.8s+1.6s+3.2s
   globalThis.__setRefreshSleep = (fn) => { refreshSleep = fn; };
+  globalThis.__filterLabs = filterLabs;
+  globalThis.__reportCatOf = reportCatOf;
+  globalThis.__renderAbnormalSummary = renderAbnormalSummary;
 }
