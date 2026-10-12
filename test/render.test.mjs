@@ -1,4 +1,4 @@
-// 用最小 DOM stub 在 Node 中执行 app.js 的渲染逻辑，捕获运行时错误
+﻿// 用最小 DOM stub 在 Node 中执行 app.js 的渲染逻辑，捕获运行时错误
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,11 +7,26 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const sample = JSON.parse(readFileSync(join(ROOT, "test", "sample-data.json"), "utf8"));
 
 // ---- 最小 DOM stub ----
+if (!globalThis.localStorage) {
+  const store = new Map();
+  globalThis.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+    removeItem: (k) => store.delete(k),
+    clear: () => store.clear(),
+  };
+}
+
 function makeEl(id) {
+  let _inner = "";
   return {
     id,
     children: [],
-    innerHTML: "",
+    get innerHTML() { return _inner; },
+    set innerHTML(val) {
+      _inner = val;
+      if (!val) this.children = [];
+    },
     textContent: "",
     hidden: false,
     disabled: false,
@@ -19,8 +34,67 @@ function makeEl(id) {
     style: {},
     _attrs: {},
     _listeners: {},
-    appendChild(c) { this.children.push(c); },
+    get nextSibling() {
+      if (!this.parentElement) return null;
+      const ch = this.parentElement.children;
+      const idx = ch.indexOf(this);
+      return idx !== -1 && idx + 1 < ch.length ? ch[idx + 1] : null;
+    },
+    appendChild(c) {
+      c.parentElement = this;
+      this.children.push(c);
+    },
     append() {},
+    replaceChild(newChild, oldChild) {
+      const idx = this.children.indexOf(oldChild);
+      if (idx !== -1) {
+        newChild.parentElement = this;
+        oldChild.parentElement = null;
+        this.children[idx] = newChild;
+      }
+    },
+    insertBefore(newChild, refChild) {
+      if (!refChild) {
+        this.appendChild(newChild);
+        return;
+      }
+      const curIdx = this.children.indexOf(newChild);
+      if (curIdx !== -1) this.children.splice(curIdx, 1);
+      const idx = this.children.indexOf(refChild);
+      if (idx !== -1) {
+        newChild.parentElement = this;
+        this.children.splice(idx, 0, newChild);
+      } else {
+        this.appendChild(newChild);
+      }
+    },
+    removeChild(c) {
+      const idx = this.children.indexOf(c);
+      if (idx !== -1) {
+        c.parentElement = null;
+        this.children.splice(idx, 1);
+      }
+    },
+    querySelectorAll(selector) {
+      if (selector === ".trend") {
+        return this.children.filter((c) => c.className && c.className.includes("trend"));
+      }
+      return [];
+    },
+    closest(selector) {
+      if (selector === ".trend" && this.className && this.className.includes("trend")) return this;
+      return null;
+    },
+    getBoundingClientRect() {
+      return { left: 0, top: 0, width: 300, height: 200 };
+    },
+    cloneNode() {
+      const copy = makeEl(this.id);
+      copy.className = this.className;
+      copy.innerHTML = this.innerHTML;
+      copy._attrs = { ...this._attrs };
+      return copy;
+    },
     // 记下监听器：刷新按钮的"失败明细自动重试"流程要在测试里真的跑一遍
     addEventListener(type, fn) { this._listeners[type] = fn; },
     setAttribute(k, v) { this._attrs[k] = String(v); },
@@ -83,6 +157,7 @@ check(trendHtml.includes("↓偏低"), "异常标记");
 check(trendHtml.includes("铁蛋白"), "自动发现:铁蛋白卡默认上屏");
 check(els["trends"].children.some((c) => c._attrs["data-skey"] === "d:铁蛋白|other"), "自动发现卡带序列键");
 check(!trendHtml.includes("网织红细胞"), "仅2份报告的网织红细胞不得默认上屏");
+check(trendHtml.includes("长按拖拽排序"), "底栏提示包含长按拖拽排序");
 // 回归：尿沉渣报告（audit_time 比当天血常规更新）的同名"白细胞"不得混入血白细胞趋势
 {
   const wbcCard = els["trends"].children[0].innerHTML;
@@ -91,6 +166,65 @@ check(!trendHtml.includes("网织红细胞"), "仅2份报告的网织红细胞�
   check(wbcCard.includes(">2.1<"), "白细胞最新值=血常规2.1(非尿沉渣88.0)");
   check(wbcCard.includes("参考 4~10"), "白细胞参考带=血常规4~10(非尿沉渣0~25)");
   check(!wbcCard.includes("88.0") && !wbcCard.includes("0~25"), "尿沉渣数值/参考带未混入白细胞卡");
+}
+
+// ---- 折线图长按拖拽排序与持久化测试 ----
+{
+  const trendsEl = els["trends"];
+  const initialKeys = trendsEl.children.map((c) => c.getAttribute("data-skey"));
+  check(initialKeys.join(",") === "core:wbc,core:hb,core:plt,core:anc,core:crp,d:铁蛋白|other,d:维生素B12|other,d:叶酸|other", "默认趋势卡顺序: 核心5项+自动发现3项");
+
+  // 1. 手动/拖拽修改顺序持久化测试
+  const reorderedKeys = ["core:crp", "core:wbc", "core:hb", "core:plt", "core:anc", "d:铁蛋白|other", "d:叶酸|other", "d:维生素B12|other"];
+  globalThis.__saveVisPref(reorderedKeys);
+  check(JSON.parse(globalThis.localStorage.getItem("hc_vis_v1"))[0] === "core:crp", "localStorage 成功记录新顺序(CRP置顶)");
+
+  // 2. 重新渲染后按照新顺序显示
+  globalThis.__renderAll(sample);
+  const updatedKeys = trendsEl.children.map((c) => c.getAttribute("data-skey"));
+  check(updatedKeys[0] === "core:crp" && updatedKeys[1] === "core:wbc", "重新渲染后卡片顺序严格遵循定制顺序(CRP排第一)");
+
+  // 3. 拖拽控制器测试 (_trendDrag)
+  const dragCtrl = trendsEl._trendDrag;
+  check(Boolean(dragCtrl), "趋势容器挂载拖拽控制器 _trendDrag");
+  if (dragCtrl) {
+    const firstCard = trendsEl.children[0];
+    const secondCard = trendsEl.children[1];
+    check(firstCard.getAttribute("data-skey") === "core:crp", "当前第一张卡片为 CRP");
+
+    // 开始拖拽第一张卡片
+    dragCtrl.startDragging(firstCard, 100, 100, 100, 100);
+    check(dragCtrl.isDragging() === true, "startDragging 成功进入拖拽状态");
+    check(trendsEl.children[0].className.includes("trend-placeholder"), "原卡片位置变为占位符");
+
+    // 模拟移动交换（将占位符移到第二张卡片后面）
+    trendsEl.insertBefore(trendsEl.children[0], secondCard.nextSibling);
+
+    // 完成拖拽
+    dragCtrl.finishDrag();
+    check(dragCtrl.isDragging() === false, "finishDrag 退出拖拽状态");
+    const afterDragKeys = trendsEl.children.map((c) => c.getAttribute("data-skey"));
+    check(afterDragKeys[0] === "core:wbc" && afterDragKeys[1] === "core:crp", "拖拽换位后 DOM 顺序已更新(WBC第一, CRP第二)");
+    check(JSON.parse(globalThis.localStorage.getItem("hc_vis_v1"))[0] === "core:wbc", "拖拽完成后自动持久化新顺序到 localStorage");
+
+    // 4. 防误触点击拦截测试 (dragJustEnded)
+    let clickBlocked = false;
+    let defaultPrevented = false;
+    trendsEl._listeners.click({
+      stopImmediatePropagation: () => { clickBlocked = true; },
+      preventDefault: () => { defaultPrevented = true; },
+    });
+    check(clickBlocked && defaultPrevented, "拖拽结束后立即捕获并拦截 click，防止误开大图");
+  }
+
+  // 5. 恢复默认推荐测试
+  const mpResetFakeEvent = {
+    target: { closest: (sel) => (sel === "#mp-reset" ? { id: "mp-reset" } : null) }
+  };
+  els["mpanel"]._listeners.click(mpResetFakeEvent);
+  check(globalThis.localStorage.getItem("hc_vis_v1") === null, "恢复默认推荐后清除 localStorage 定制顺序");
+  const restoredKeys = trendsEl.children.map((c) => c.getAttribute("data-skey"));
+  check(restoredKeys[0] === "core:wbc" && restoredKeys[4] === "core:crp", "趋势卡顺序恢复系统默认(WBC排首位, CRP排第五)");
 }
 const labsHtml = els["labs"].children.map((c) => c.innerHTML).join("");
 check(labsHtml.includes("血常规"), "检验报告渲染");

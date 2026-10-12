@@ -466,8 +466,11 @@ function renderTrends(labs) {
       `<div class="big ${cls}">${fmtNum(last.v)}</div>` +
       `<div class="sub">${s.ref ? `参考 ${s.ref[0]}~${s.ref[1]} · ` : ""}${delta ? `较上次${delta} · ` : ""}${esc(last.day)}</div>` +
       svgChart(s.pts, s.ref, cols) +
-      `<div class="zoom-hint">🔍 点击卡片看大图 · 数据可溯源</div>`;
-    card.addEventListener("click", () => openBigChart(s));
+      `<div class="zoom-hint">🔍 点击看大图 · 长按拖拽排序</div>`;
+    card.addEventListener("click", () => {
+      if (dragJustEnded) return;
+      openBigChart(s);
+    });
     trendsEl.appendChild(card);
   }
   $("trends-empty").hidden = anyTrend;
@@ -483,6 +486,375 @@ function renderTrends(labs) {
       renderMetricPanel();
     }
   }
+}
+
+/* ---------- 趋势折线图长按拖拽排序 ---------- */
+let dragJustEnded = false;
+
+function flipMove(container, mutateFn) {
+  if (typeof window === "undefined" || !window.requestAnimationFrame) {
+    mutateFn();
+    return;
+  }
+  const children = Array.from(container.children || []);
+  const firsts = new Map();
+  for (const c of children) {
+    if (c.classList && c.classList.contains("trend-placeholder")) continue;
+    if (c.getBoundingClientRect) firsts.set(c, c.getBoundingClientRect());
+  }
+  mutateFn();
+  for (const c of children) {
+    const first = firsts.get(c);
+    if (!first || !c.getBoundingClientRect) continue;
+    const last = c.getBoundingClientRect();
+    const dx = first.left - last.left;
+    const dy = first.top - last.top;
+    if (dx !== 0 || dy !== 0) {
+      c.style.transform = `translate(${dx}px, ${dy}px)`;
+      c.style.transition = "none";
+      window.requestAnimationFrame(() => {
+        void c.offsetHeight;
+        c.style.transition = "transform .22s cubic-bezier(0.2, 0, 0, 1)";
+        c.style.transform = "";
+        const clean = () => {
+          c.style.transition = "";
+          c.removeEventListener("transitionend", clean);
+        };
+        c.addEventListener("transitionend", clean);
+      });
+    }
+  }
+}
+
+function initTrendDrag(trendsEl) {
+  if (!trendsEl) return;
+
+  let dragTimer = null;
+  let activeDrag = null;
+  let touchStartX = 0;
+  let touchStartY = 0;
+
+  // 捕获阶段拦截点击：若刚结束拖拽，停止冒泡和默认行为以防误开大图
+  trendsEl.addEventListener(
+    "click",
+    (e) => {
+      if (dragJustEnded) {
+        if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+        if (e.preventDefault) e.preventDefault();
+      }
+    },
+    true
+  );
+
+  function startDragging(card, startX, startY, curX, curY) {
+    if (typeof navigator !== "undefined" && navigator.vibrate) {
+      try { navigator.vibrate(35); } catch {}
+    }
+
+    const rect = card.getBoundingClientRect ? card.getBoundingClientRect() : { left: 0, top: 0, width: 300, height: 200 };
+
+    // 占位卡片：保持网格尺寸
+    const placeholder = document.createElement("div");
+    placeholder.className = "card trend trend-placeholder";
+    if (rect.width) placeholder.style.width = rect.width + "px";
+    if (rect.height) placeholder.style.height = rect.height + "px";
+    const skey = card.getAttribute ? card.getAttribute("data-skey") : "";
+    if (skey) placeholder.setAttribute("data-skey", skey);
+
+    // 浮动镜像：随手指移动
+    let mirror = null;
+    if (card.cloneNode) {
+      mirror = card.cloneNode(true);
+      mirror.className = (card.className || "card trend") + " trend-drag-mirror";
+      mirror.style.width = rect.width + "px";
+      mirror.style.height = rect.height + "px";
+      mirror.style.left = rect.left + "px";
+      mirror.style.top = rect.top + "px";
+      mirror.style.transform = "scale(1.03)";
+      if (document.body && document.body.appendChild) {
+        document.body.appendChild(mirror);
+      }
+    }
+
+    if (document.body && document.body.classList) {
+      document.body.classList.add("is-sorting");
+    }
+
+    if (trendsEl.replaceChild) {
+      trendsEl.replaceChild(placeholder, card);
+    }
+
+    activeDrag = {
+      card,
+      placeholder,
+      mirror,
+      startX,
+      startY,
+    };
+
+    updateDrag(curX ?? startX, curY ?? startY);
+  }
+
+  function updateDrag(clientX, clientY) {
+    if (!activeDrag) return;
+
+    if (activeDrag.mirror) {
+      const dx = clientX - activeDrag.startX;
+      const dy = clientY - activeDrag.startY;
+      activeDrag.mirror.style.transform = `translate3d(${dx}px, ${dy}px, 0) scale(1.03)`;
+    }
+
+    if (typeof window !== "undefined" && window.scrollBy) {
+      if (clientY < 70) {
+        window.scrollBy(0, -6);
+      } else if (clientY > (window.innerHeight || 800) - 70) {
+        window.scrollBy(0, 6);
+      }
+    }
+
+    let targetCard = null;
+    if (typeof document !== "undefined" && document.elementFromPoint) {
+      const hit = document.elementFromPoint(clientX, clientY);
+      if (hit && hit.closest) {
+        targetCard = hit.closest(".trend");
+        if (targetCard && (targetCard.parentElement !== trendsEl || targetCard === activeDrag.placeholder)) {
+          targetCard = null;
+        }
+      }
+    }
+
+    if (targetCard && targetCard.getBoundingClientRect) {
+      const tr = targetCard.getBoundingClientRect();
+      const cy = tr.top + tr.height / 2;
+      const cx = tr.left + tr.width / 2;
+
+      const children = Array.from(trendsEl.children || []);
+      const isTargetAfter = children.indexOf(activeDrag.placeholder) < children.indexOf(targetCard);
+
+      let shouldSwap = false;
+      let insertBeforeNode = null;
+
+      if (isTargetAfter) {
+        if (clientY > cy || (Math.abs(clientY - cy) < 30 && clientX > cx)) {
+          shouldSwap = true;
+          insertBeforeNode = targetCard.nextSibling;
+        }
+      } else {
+        if (clientY < cy || (Math.abs(clientY - cy) < 30 && clientX < cx)) {
+          shouldSwap = true;
+          insertBeforeNode = targetCard;
+        }
+      }
+
+      if (shouldSwap && trendsEl.insertBefore) {
+        flipMove(trendsEl, () => {
+          trendsEl.insertBefore(activeDrag.placeholder, insertBeforeNode);
+        });
+      }
+    }
+  }
+
+  function finishDrag() {
+    if (!activeDrag) return;
+
+    dragJustEnded = true;
+    setTimeout(() => { dragJustEnded = false; }, 350);
+
+    const { card, placeholder, mirror } = activeDrag;
+    if (placeholder && placeholder.parentElement === trendsEl && trendsEl.replaceChild) {
+      trendsEl.replaceChild(card, placeholder);
+    }
+    if (mirror && mirror.parentNode) {
+      mirror.parentNode.removeChild(mirror);
+    }
+    if (document.body && document.body.classList) {
+      document.body.classList.remove("is-sorting");
+    }
+
+    activeDrag = null;
+    persistCurrentOrder();
+  }
+
+  function cancelDrag() {
+    if (!activeDrag) return;
+
+    dragJustEnded = true;
+    setTimeout(() => { dragJustEnded = false; }, 350);
+
+    const { card, placeholder, mirror } = activeDrag;
+    if (placeholder && placeholder.parentElement === trendsEl && trendsEl.replaceChild) {
+      trendsEl.replaceChild(card, placeholder);
+    }
+    if (mirror && mirror.parentNode) {
+      mirror.parentNode.removeChild(mirror);
+    }
+    if (document.body && document.body.classList) {
+      document.body.classList.remove("is-sorting");
+    }
+
+    activeDrag = null;
+  }
+
+  function persistCurrentOrder() {
+    const cards = trendsEl.querySelectorAll ? Array.from(trendsEl.querySelectorAll(".trend")) : Array.from(trendsEl.children || []);
+    const newKeys = cards.map((c) => c.getAttribute && c.getAttribute("data-skey")).filter(Boolean);
+    if (!newKeys.length) return;
+
+    const curPref = loadVisPref() || [
+      ...CORE_DEFS.map((d) => d.key),
+      ...DISCO_LIST.slice(0, AUTO_TOP_N).map((s) => s.key),
+    ];
+    const remaining = curPref.filter((k) => !newKeys.includes(k));
+    const finalKeys = [...newKeys, ...remaining];
+
+    saveVisPref(finalKeys);
+    MP_VIS_KEYS = new Set(finalKeys);
+
+    const panel = $("mpanel");
+    if (panel && !panel.hidden && typeof renderMetricPanel === "function") {
+      renderMetricPanel();
+    }
+  }
+
+  // ---- 触屏事件 ----
+  trendsEl.addEventListener(
+    "touchstart",
+    (e) => {
+      if (e.touches.length !== 1) {
+        if (activeDrag) cancelDrag();
+        return;
+      }
+      const card = e.target && e.target.closest ? e.target.closest(".trend") : null;
+      if (!card || card.parentElement !== trendsEl) return;
+      const count = trendsEl.querySelectorAll ? trendsEl.querySelectorAll(".trend").length : (trendsEl.children ? trendsEl.children.length : 0);
+      if (count <= 1) return;
+
+      const t = e.touches[0];
+      touchStartX = t.clientX;
+      touchStartY = t.clientY;
+
+      dragTimer = setTimeout(() => {
+        dragTimer = null;
+        startDragging(card, touchStartX, touchStartY, t.clientX, t.clientY);
+      }, 350);
+    },
+    { passive: true }
+  );
+
+  trendsEl.addEventListener(
+    "touchmove",
+    (e) => {
+      if (e.touches.length !== 1) return;
+      const t = e.touches[0];
+
+      if (dragTimer) {
+        const dist = Math.hypot(t.clientX - touchStartX, t.clientY - touchStartY);
+        if (dist > 8) {
+          clearTimeout(dragTimer);
+          dragTimer = null;
+        }
+      }
+
+      if (activeDrag) {
+        if (e.preventDefault) e.preventDefault();
+        updateDrag(t.clientX, t.clientY);
+      }
+    },
+    { passive: false }
+  );
+
+  trendsEl.addEventListener("touchend", (e) => {
+    if (dragTimer) {
+      clearTimeout(dragTimer);
+      dragTimer = null;
+    }
+    if (activeDrag) {
+      if (e.preventDefault) e.preventDefault();
+      finishDrag();
+    }
+  });
+
+  trendsEl.addEventListener("touchcancel", () => {
+    if (dragTimer) {
+      clearTimeout(dragTimer);
+      dragTimer = null;
+    }
+    if (activeDrag) {
+      cancelDrag();
+    }
+  });
+
+  // ---- 桌面鼠标事件 ----
+  trendsEl.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    const card = e.target && e.target.closest ? e.target.closest(".trend") : null;
+    if (!card || card.parentElement !== trendsEl) return;
+    const count = trendsEl.querySelectorAll ? trendsEl.querySelectorAll(".trend").length : (trendsEl.children ? trendsEl.children.length : 0);
+    if (count <= 1) return;
+
+    const startX = e.clientX;
+    const startY = e.clientY;
+
+    const onMouseMove = (me) => {
+      if (dragTimer) {
+        if (Math.hypot(me.clientX - startX, me.clientY - startY) > 6) {
+          clearTimeout(dragTimer);
+          dragTimer = null;
+          removeMouse();
+        }
+      }
+      if (activeDrag) {
+        if (me.preventDefault) me.preventDefault();
+        updateDrag(me.clientX, me.clientY);
+      }
+    };
+
+    const onMouseUp = (me) => {
+      if (dragTimer) {
+        clearTimeout(dragTimer);
+        dragTimer = null;
+      }
+      if (activeDrag) {
+        if (me.preventDefault) me.preventDefault();
+        finishDrag();
+      }
+      removeMouse();
+    };
+
+    const removeMouse = () => {
+      if (typeof window !== "undefined") {
+        window.removeEventListener("mousemove", onMouseMove);
+        window.removeEventListener("mouseup", onMouseUp);
+      }
+    };
+
+    if (typeof window !== "undefined") {
+      window.addEventListener("mousemove", onMouseMove);
+      window.addEventListener("mouseup", onMouseUp);
+    }
+
+    dragTimer = setTimeout(() => {
+      dragTimer = null;
+      startDragging(card, startX, startY, e.clientX, e.clientY);
+    }, 350);
+  });
+
+  // 键盘取消（Esc）
+  if (typeof window !== "undefined") {
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && activeDrag) cancelDrag();
+    });
+  }
+
+  // 暴露控制器以便测试
+  trendsEl._trendDrag = {
+    startDragging,
+    updateDrag,
+    finishDrag,
+    cancelDrag,
+    persistCurrentOrder,
+    isDragging: () => Boolean(activeDrag),
+  };
 }
 
 /* ---------- 报告溯源跳转 ---------- */
@@ -972,6 +1344,10 @@ if (aiCopyBtn) aiCopyBtn.addEventListener("click", async () => {
   setAiStatus(await copyText(prompt));
 });
 
+/* ---------- 趋势折线图拖拽排序初始化 ---------- */
+const trendsRoot = $("trends");
+if (trendsRoot) initTrendDrag(trendsRoot);
+
 /* ---------- 添加指标面板 ---------- */
 const btnMetrics = $("btn-metrics");
 if (btnMetrics) btnMetrics.addEventListener("click", () => {
@@ -1174,4 +1550,7 @@ if (typeof window === "undefined") {
   globalThis.__filterLabs = filterLabs;
   globalThis.__reportCatOf = reportCatOf;
   globalThis.__renderAbnormalSummary = renderAbnormalSummary;
+  globalThis.__initTrendDrag = initTrendDrag;
+  globalThis.__loadVisPref = loadVisPref;
+  globalThis.__saveVisPref = saveVisPref;
 }
