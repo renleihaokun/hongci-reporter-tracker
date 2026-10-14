@@ -1,4 +1,4 @@
-﻿// 用最小 DOM stub 在 Node 中执行 app.js 的渲染逻辑，捕获运行时错误
+// 用最小 DOM stub 在 Node 中执行 app.js 的渲染逻辑，捕获运行时错误
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,6 +41,8 @@ function makeEl(id) {
       return idx !== -1 && idx + 1 < ch.length ? ch[idx + 1] : null;
     },
     appendChild(c) {
+      const i = this.children.indexOf(c);
+      if (i !== -1) this.children.splice(i, 1); // 与真实 DOM 一致：同一节点在父节点里只出现一次
       c.parentElement = this;
       this.children.push(c);
     },
@@ -117,6 +119,15 @@ globalThis.document = {
   getElementById: (id) => els[id] ?? null,
   createElement: () => makeEl("dynamic"),
   body: { appendChild() {}, removeChild() {} },
+  // 拖拽的 move/end/cancel 是挂在 document 上的（触摸事件认的是 touchstart 那个节点，
+  // 只挂容器会在卡片换位/重绘后收不到事件），这里记录一下方便断言挂载与摘除
+  _listeners: {},
+  addEventListener(type, fn) { (this._listeners[type] = this._listeners[type] || []).push(fn); },
+  removeEventListener(type, fn) {
+    const arr = this._listeners[type] || [];
+    const i = arr.indexOf(fn);
+    if (i !== -1) arr.splice(i, 1);
+  },
 };
 Object.defineProperty(globalThis, "navigator", {
   value: { clipboard: { writeText: async () => {} } },
@@ -215,6 +226,50 @@ check(trendHtml.includes("长按拖拽排序"), "底栏提示包含长按拖拽�
       preventDefault: () => { defaultPrevented = true; },
     });
     check(clickBlocked && defaultPrevented, "拖拽结束后立即捕获并拦截 click，防止误开大图");
+
+    // 5. 移动端回归：拖拽期间原卡片必须留在 #trends 里（"卡片卡在空中"的根因）
+    //    浏览器会把整个手势的后续事件继续投递给 touchstart 的那个节点；该节点一旦被摘出文档，
+    //    touchmove/touchend/touchcancel 就全部丢失（连 window 上的监听也收不到），
+    //    于是镜像钉死、占位符残留、body.is-sorting 摘不掉。所以拖拽只能"克隆一个跟着飞"，
+    //    原卡片留下当占位符 —— 下面这几条就是钉死这个不变量。
+    const docHas = (t) => ((globalThis.document._listeners[t] || []).length > 0);
+    {
+      const keepCard = trendsEl.children[0];
+      const keepKey = keepCard.getAttribute("data-skey");
+      const countBefore = trendsEl.children.length;
+
+      dragCtrl.startDragging(keepCard, 10, 10, 10, 10);
+      check(keepCard.parentElement === trendsEl && trendsEl.children.indexOf(keepCard) !== -1, "拖拽中卡片本体仍在 #trends 内(未被换成占位 div)");
+      check(trendsEl.children.length === countBefore, "拖拽不额外插入占位节点(子节点数量不变)");
+      check(keepCard.className.includes("trend-placeholder"), "卡片本体带上占位样式类");
+      check(docHas("touchmove") && docHas("touchend") && docHas("touchcancel"), "拖拽开始时把 move/end/cancel 挂到 document 上(事件认节点,不认容器)");
+
+      dragCtrl.finishDrag();
+      check(!docHas("touchmove") && !docHas("touchend") && !docHas("touchcancel"), "拖拽结束摘掉 document 上的触摸监听(不在页面生命周期里常驻)");
+      check(!keepCard.className.includes("trend-placeholder"), "拖拽结束清除占位样式类");
+      check(trendsEl.children.indexOf(keepCard) !== -1 && keepCard.getAttribute("data-skey") === keepKey, "卡片仍在网格里且槽位正确");
+
+      // 6. 取消(Esc / 系统打断) → 回原位且不写记忆
+      const keysBefore = trendsEl.children.map((c) => c.getAttribute("data-skey"));
+      const backCard = trendsEl.children[0];
+      dragCtrl.startDragging(backCard, 10, 10, 10, 10);
+      trendsEl.insertBefore(backCard, null); // 模拟已经一路拖到最后一个槽位
+      check(trendsEl.children.indexOf(backCard) === trendsEl.children.length - 1, "模拟拖拽：卡片已挪到末位");
+      const prefBeforeCancel = globalThis.localStorage.getItem("hc_vis_v1");
+      dragCtrl.cancelDrag();
+      check(trendsEl.children.indexOf(backCard) === 0, "取消后卡片回到原槽位");
+      check(globalThis.localStorage.getItem("hc_vis_v1") === prefBeforeCancel, "取消不写入顺序记忆");
+      check(!backCard.className.includes("trend-placeholder") && !docHas("touchmove"), "取消后状态同样清理干净");
+      check(trendsEl.children.map((c) => c.getAttribute("data-skey")).join() === keysBefore.join(), "取消后整体顺序不变");
+
+      // 7. 拖拽中若发生重新渲染(刷新数据)，必须先中断，否则卡片会被 innerHTML 清掉、镜像悬空
+      dragCtrl.startDragging(trendsEl.children[0], 10, 10, 10, 10);
+      check(dragCtrl.isDragging() === true, "重新渲染前处于拖拽状态");
+      globalThis.__renderAll(sample);
+      check(dragCtrl.isDragging() === false, "重新渲染自动中断拖拽");
+      check(!trendsEl.children.some((c) => String(c.className).includes("trend-placeholder")), "重新渲染后没有残留占位卡片");
+      check(!globalThis.document.body.className.includes("is-sorting"), "重新渲染后 body 不残留 is-sorting 状态类");
+    }
   }
 
   // 5. 恢复默认推荐测试

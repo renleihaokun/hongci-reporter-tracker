@@ -221,31 +221,52 @@ h2:not(.sec-head h2) { margin: 22px 0 10px; font-size: 17px; padding-left: 10px;
 .trend {
   cursor: pointer; transition: transform .12s ease, box-shadow .2s ease, background .25s ease;
   user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
-  touch-action: pan-y;
+  /*
+   * 这里**不要**写 touch-action: pan-y。那等于授权合成器"不必等主线程直接纵向滚动"，
+   * 于是拖拽期间主线程里的 preventDefault() 拦不住页面，手指一动整页跟着滚（实测滚了 285px）。
+   * 保持默认 auto：滚动前会先问主线程，长按只是按着不动时页面照常滚，长按进入拖拽后才锁住。
+   */
 }
 .trend:hover { box-shadow: var(--shadow), 0 0 0 1.5px var(--blue); }
 .trend:active { transform: scale(.99); }
+/*
+ * 拖拽中的原卡片留在网格里当"空位"（不能摘出 DOM：浏览器会把后续触摸事件继续投递给
+ * touchstart 的那个节点，节点一旦脱离文档就再也收不到 touchmove/touchend）。
+ */
 .trend.trend-placeholder {
   opacity: .35;
   outline: 2px dashed var(--blue);
   outline-offset: -2px;
   box-shadow: none !important;
   transform: none !important;
+  background: var(--chip);
 }
+.trend.trend-placeholder:hover { box-shadow: none !important; }
+.trend.trend-placeholder > * { visibility: hidden; } /* 只留一个虚线空槽，避免和浮起镜像重影 */
 .trend-drag-mirror {
   position: fixed !important;
   z-index: 9999 !important;
   pointer-events: none !important;
   margin: 0 !important;
   box-shadow: 0 16px 36px rgba(0, 0, 0, .22), 0 0 0 2px var(--blue) !important;
-  opacity: .96;
-  transform-origin: center center;
-  will-change: transform, left, top;
+  opacity: 1; /* 别用半透明：下层的卡片会透出来，看起来像重影 */
+  transform-origin: center top;
+  will-change: transform;
 }
 body.is-sorting {
   user-select: none !important;
   -webkit-user-select: none !important;
+  -webkit-touch-callout: none !important;
+  /*
+   * 拖拽时会不断把卡片 insertBefore 换位，Chrome 的滚动锚定会误判成"上方内容变高了"，
+   * 于是自己补偿滚动，把整页顶偏（实测一指位移 285px，页面跟着滚 285px）。
+   * 只在拖拽期间关掉锚定即可，松手即恢复。
+   */
+  overflow-anchor: none;
 }
+body.is-sorting .trend { cursor: grabbing; }
+body.is-sorting .trend:active { transform: none; }
+body.is-sorting .trend:not(.trend-placeholder):hover { box-shadow: var(--shadow); }
 .trend h3 { font-size: 14px; color: var(--text); margin-bottom: 3px; font-weight: 600; }
 .mtag {
   display: inline-block; font-size: 10.5px; font-weight: 500; color: var(--sub);

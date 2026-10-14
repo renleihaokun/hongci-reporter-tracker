@@ -445,6 +445,8 @@ function openBigChart(s, selectRepId) {
 }
 
 function renderTrends(labs) {
+  // 重绘会清空 #trends：拖拽中的话先中断，免得镜像悬空、卡片被 innerHTML 清掉
+  if (trendDragCtl) trendDragCtl.abort();
   const cores = buildAllSeries(labs);
   const visibles = visibleSeries(cores);
   const cols = chartColors();
@@ -489,7 +491,40 @@ function renderTrends(labs) {
 }
 
 /* ---------- 趋势折线图长按拖拽排序 ---------- */
+/*
+ * 移动端三条铁律（都是踩过的坑，勿轻易改动）：
+ *
+ * 1) 触摸手势的目标节点在 touchstart 时就被浏览器锁定：之后所有 touchmove / touchend / touchcancel
+ *    都会继续投递给"那个节点"。一旦它被从 DOM 里摘掉，后续事件会**彻底消失** —— 不是重定向到
+ *    document，而是谁都收不到（连 window 上的捕获监听也一样）。所以拖拽期间原卡片必须**留在
+ *    #trends 里**当占位符，跟着手指飞的是它的克隆镜像；绝不能 replaceChild 掉原卡片。
+ *
+ * 2) 正因为事件认的是"节点"而不是"容器"，move / end / cancel 不能只挂在自己容器上：
+ *    拖拽开始时统一挂到 document（capture），结束时摘掉。
+ *
+ * 3) #trends 上的 touchmove 必须保持 { passive: false }。Chrome 只有在手势起点存在非 passive 的
+ *    touchmove 监听时，才会在滚动前等主线程；否则合成器自己就滚了，事后再 preventDefault() 也拦不住。
+ *    这条同时保证了"长按前滑动=正常滚动、长按后滑动=拖拽不滚动"。
+ */
 let dragJustEnded = false;
+
+const LONG_PRESS_MS = 350;   // 长按判定时长
+const DRAG_SLOP_PX = 8;      // 长按等待期手指位移超过该值即视为滚动，放弃拖拽
+const EDGE_ZONE_PX = 90;     // 距离视口上下边缘多近开始自动滚动
+const EDGE_MAX_SPEED = 14;   // 自动滚动最大速度（px/帧）
+
+/* 类名工具：真实 DOM 与测试里的最小 stub（无 classList）都能用 */
+function hasClass(el, name) {
+  return Boolean(el && el.className && String(el.className).split(/\s+/).indexOf(name) !== -1);
+}
+function addClass(el, name) {
+  if (!el || hasClass(el, name)) return;
+  el.className = el.className ? el.className + " " + name : name;
+}
+function removeClass(el, name) {
+  if (!el || !el.className) return;
+  el.className = String(el.className).split(/\s+/).filter((c) => c && c !== name).join(" ");
+}
 
 function flipMove(container, mutateFn) {
   if (typeof window === "undefined" || !window.requestAnimationFrame) {
@@ -529,10 +564,21 @@ function flipMove(container, mutateFn) {
 function initTrendDrag(trendsEl) {
   if (!trendsEl) return;
 
-  let dragTimer = null;
-  let activeDrag = null;
-  let touchStartX = 0;
-  let touchStartY = 0;
+  const doc = typeof document !== "undefined" ? document : null;
+  const win = typeof window !== "undefined" ? window : null;
+
+  let pressTimer = null;   // 长按计时器
+  let pressCard = null;    // 正在等待长按的卡片
+  let pressX = 0;          // 按下时的落点
+  let pressY = 0;
+  let activeDrag = null;   // 当前拖拽会话
+  let rafId = null;        // 边缘自动滚动的 rAF 句柄
+
+  function clearPress() {
+    if (pressTimer) clearTimeout(pressTimer);
+    pressTimer = null;
+    pressCard = null;
+  }
 
   // 捕获阶段拦截点击：若刚结束拖拽，停止冒泡和默认行为以防误开大图
   trendsEl.addEventListener(
@@ -546,153 +592,218 @@ function initTrendDrag(trendsEl) {
     true
   );
 
-  function startDragging(card, startX, startY, curX, curY) {
+  function startDragging(card, startX, startY, curX, curY, source) {
+    if (activeDrag) return;
+    if (!card || card.parentElement !== trendsEl) return;
+
     if (typeof navigator !== "undefined" && navigator.vibrate) {
       try { navigator.vibrate(35); } catch {}
     }
 
     const rect = card.getBoundingClientRect ? card.getBoundingClientRect() : { left: 0, top: 0, width: 300, height: 200 };
 
-    // 占位卡片：保持网格尺寸
-    const placeholder = document.createElement("div");
-    placeholder.className = "card trend trend-placeholder";
-    if (rect.width) placeholder.style.width = rect.width + "px";
-    if (rect.height) placeholder.style.height = rect.height + "px";
-    const skey = card.getAttribute ? card.getAttribute("data-skey") : "";
-    if (skey) placeholder.setAttribute("data-skey", skey);
-
-    // 浮动镜像：随手指移动
+    // 浮动镜像：克隆体跟着手指飞
     let mirror = null;
-    if (card.cloneNode) {
+    if (card.cloneNode && doc && doc.body && doc.body.appendChild) {
       mirror = card.cloneNode(true);
-      mirror.className = (card.className || "card trend") + " trend-drag-mirror";
-      mirror.style.width = rect.width + "px";
-      mirror.style.height = rect.height + "px";
-      mirror.style.left = rect.left + "px";
-      mirror.style.top = rect.top + "px";
-      mirror.style.transform = "scale(1.03)";
-      if (document.body && document.body.appendChild) {
-        document.body.appendChild(mirror);
+      if (mirror.style) {
+        mirror.style.cssText = ""; // 清掉可能残留的 FLIP 内联样式
+        mirror.style.width = rect.width + "px";
+        mirror.style.height = rect.height + "px";
+        mirror.style.left = rect.left + "px";
+        mirror.style.top = rect.top + "px";
+        mirror.style.transform = "scale(1.03)";
       }
+      mirror.className = (card.className || "card trend") + " trend-drag-mirror";
+      doc.body.appendChild(mirror);
     }
 
-    if (document.body && document.body.classList) {
-      document.body.classList.add("is-sorting");
-    }
-
-    if (trendsEl.replaceChild) {
-      trendsEl.replaceChild(placeholder, card);
-    }
+    // 原卡片留在网格里当占位符（见上方铁律 1：绝不能把它摘出 DOM）
+    addClass(card, "trend-placeholder");
+    if (doc && doc.body) addClass(doc.body, "is-sorting");
 
     activeDrag = {
       card,
-      placeholder,
       mirror,
       startX,
       startY,
+      lastX: typeof curX === "number" ? curX : startX,
+      lastY: typeof curY === "number" ? curY : startY,
+      originNext: card.nextSibling || null, // 取消时回到原位用
+      source: source || "touch",
     };
 
-    updateDrag(curX ?? startX, curY ?? startY);
+    if (activeDrag.source === "touch") attachDocTouch();
+    startAutoScroll();
+
+    updateDrag(activeDrag.lastX, activeDrag.lastY);
   }
 
   function updateDrag(clientX, clientY) {
     if (!activeDrag) return;
+    activeDrag.lastX = clientX;
+    activeDrag.lastY = clientY;
 
-    if (activeDrag.mirror) {
+    if (activeDrag.mirror && activeDrag.mirror.style) {
       const dx = clientX - activeDrag.startX;
       const dy = clientY - activeDrag.startY;
       activeDrag.mirror.style.transform = `translate3d(${dx}px, ${dy}px, 0) scale(1.03)`;
     }
 
-    if (typeof window !== "undefined" && window.scrollBy) {
-      if (clientY < 70) {
-        window.scrollBy(0, -6);
-      } else if (clientY > (window.innerHeight || 800) - 70) {
-        window.scrollBy(0, 6);
-      }
-    }
+    refreshDropTarget();
+  }
+
+  /* 手指当前位置落在哪张卡上 → 把占位卡片挪过去（带 FLIP 动画） */
+  function refreshDropTarget() {
+    const drag = activeDrag;
+    if (!drag) return;
 
     let targetCard = null;
-    if (typeof document !== "undefined" && document.elementFromPoint) {
-      const hit = document.elementFromPoint(clientX, clientY);
+    if (doc && doc.elementFromPoint) {
+      const hit = doc.elementFromPoint(drag.lastX, drag.lastY);
       if (hit && hit.closest) {
         targetCard = hit.closest(".trend");
-        if (targetCard && (targetCard.parentElement !== trendsEl || targetCard === activeDrag.placeholder)) {
-          targetCard = null;
-        }
+        // 自己那张不算落点（被拖的卡本身留在原位当占位符）
+        if (targetCard && (targetCard.parentElement !== trendsEl || targetCard === drag.card)) targetCard = null;
+      }
+    }
+    if (!targetCard || !targetCard.getBoundingClientRect) return;
+
+    const tr = targetCard.getBoundingClientRect();
+    const cy = tr.top + tr.height / 2;
+    const cx = tr.left + tr.width / 2;
+    const children = Array.from(trendsEl.children || []);
+    const isTargetAfter = children.indexOf(drag.card) < children.indexOf(targetCard);
+
+    let shouldSwap = false;
+    let insertBeforeNode = null;
+
+    if (isTargetAfter) {
+      if (drag.lastY > cy || (Math.abs(drag.lastY - cy) < 30 && drag.lastX > cx)) {
+        shouldSwap = true;
+        insertBeforeNode = targetCard.nextSibling;
+      }
+    } else {
+      if (drag.lastY < cy || (Math.abs(drag.lastY - cy) < 30 && drag.lastX < cx)) {
+        shouldSwap = true;
+        insertBeforeNode = targetCard;
       }
     }
 
-    if (targetCard && targetCard.getBoundingClientRect) {
-      const tr = targetCard.getBoundingClientRect();
-      const cy = tr.top + tr.height / 2;
-      const cx = tr.left + tr.width / 2;
-
-      const children = Array.from(trendsEl.children || []);
-      const isTargetAfter = children.indexOf(activeDrag.placeholder) < children.indexOf(targetCard);
-
-      let shouldSwap = false;
-      let insertBeforeNode = null;
-
-      if (isTargetAfter) {
-        if (clientY > cy || (Math.abs(clientY - cy) < 30 && clientX > cx)) {
-          shouldSwap = true;
-          insertBeforeNode = targetCard.nextSibling;
-        }
-      } else {
-        if (clientY < cy || (Math.abs(clientY - cy) < 30 && clientX < cx)) {
-          shouldSwap = true;
-          insertBeforeNode = targetCard;
-        }
-      }
-
-      if (shouldSwap && trendsEl.insertBefore) {
-        flipMove(trendsEl, () => {
-          trendsEl.insertBefore(activeDrag.placeholder, insertBeforeNode);
-        });
-      }
+    if (shouldSwap && trendsEl.insertBefore) {
+      flipMove(trendsEl, () => {
+        trendsEl.insertBefore(drag.card, insertBeforeNode);
+      });
     }
   }
 
-  function finishDrag() {
-    if (!activeDrag) return;
+  /* 收尾公共部分：摘监听、撤镜像、恢复卡片、清 body 状态 */
+  function teardownDrag() {
+    const drag = activeDrag;
+    if (!drag) return null;
 
-    dragJustEnded = true;
-    setTimeout(() => { dragJustEnded = false; }, 350);
+    stopAutoScroll();
+    if (drag.source === "touch") detachDocTouch();
+    if (typeof drag.onMouseCleanup === "function") drag.onMouseCleanup();
 
-    const { card, placeholder, mirror } = activeDrag;
-    if (placeholder && placeholder.parentElement === trendsEl && trendsEl.replaceChild) {
-      trendsEl.replaceChild(card, placeholder);
+    removeClass(drag.card, "trend-placeholder");
+    if (drag.mirror && drag.mirror.parentNode && drag.mirror.parentNode.removeChild) {
+      drag.mirror.parentNode.removeChild(drag.mirror);
     }
-    if (mirror && mirror.parentNode) {
-      mirror.parentNode.removeChild(mirror);
-    }
-    if (document.body && document.body.classList) {
-      document.body.classList.remove("is-sorting");
-    }
+    if (doc && doc.body) removeClass(doc.body, "is-sorting");
 
     activeDrag = null;
+    return drag;
+  }
+
+  function markDragEnded() {
+    dragJustEnded = true;
+    setTimeout(() => { dragJustEnded = false; }, 350);
+  }
+
+  /* 抬手：落在哪就留在哪，并持久化顺序 */
+  function finishDrag() {
+    const drag = teardownDrag();
+    if (!drag) return;
+    markDragEnded();
     persistCurrentOrder();
   }
 
+  /* 中断（Esc / 触摸被系统打断 / 多指）：回到原位，不持久化 */
   function cancelDrag() {
+    const drag = teardownDrag();
+    if (!drag) return;
+    markDragEnded();
+    if (drag.card && drag.card.parentElement === trendsEl && trendsEl.insertBefore) {
+      try {
+        const ref = drag.originNext && drag.originNext.parentElement === trendsEl ? drag.originNext : null;
+        trendsEl.insertBefore(drag.card, ref);
+      } catch {}
+    }
+  }
+
+  // ---- document 级触摸监听：只在一段拖拽期间挂着（长期挂着会拖慢滚动快路径）----
+  function onDocTouchMove(e) {
     if (!activeDrag) return;
+    if (e.touches && e.touches.length > 1) { cancelDrag(); return; }
+    const t = e.touches && e.touches[0];
+    if (!t) return;
+    if (e.cancelable && e.preventDefault) e.preventDefault(); // 拖拽期间禁止页面跟着滚
+    updateDrag(t.clientX, t.clientY);
+  }
+  function onDocTouchEnd(e) {
+    if (!activeDrag) return;
+    if (e && e.cancelable && e.preventDefault) e.preventDefault(); // 掐掉拖拽后合成的 click，避免误开大图
+    finishDrag();
+  }
+  function onDocTouchCancel() { if (activeDrag) cancelDrag(); }
+  function onDocTouchStart(e) { if (activeDrag && e.touches && e.touches.length > 1) cancelDrag(); }
+  function onWinBlur() { if (activeDrag) finishDrag(); }
 
-    dragJustEnded = true;
-    setTimeout(() => { dragJustEnded = false; }, 350);
+  function attachDocTouch() {
+    if (!doc || !doc.addEventListener) return;
+    doc.addEventListener("touchmove", onDocTouchMove, { passive: false, capture: true });
+    doc.addEventListener("touchend", onDocTouchEnd, true);
+    doc.addEventListener("touchcancel", onDocTouchCancel, true);
+    doc.addEventListener("touchstart", onDocTouchStart, true);
+    if (doc.defaultView && doc.defaultView.addEventListener) doc.defaultView.addEventListener("blur", onWinBlur);
+  }
+  function detachDocTouch() {
+    if (!doc || !doc.removeEventListener) return;
+    doc.removeEventListener("touchmove", onDocTouchMove, true);
+    doc.removeEventListener("touchend", onDocTouchEnd, true);
+    doc.removeEventListener("touchcancel", onDocTouchCancel, true);
+    doc.removeEventListener("touchstart", onDocTouchStart, true);
+    if (doc.defaultView && doc.defaultView.removeEventListener) doc.defaultView.removeEventListener("blur", onWinBlur);
+  }
 
-    const { card, placeholder, mirror } = activeDrag;
-    if (placeholder && placeholder.parentElement === trendsEl && trendsEl.replaceChild) {
-      trendsEl.replaceChild(card, placeholder);
+  // ---- 拖到屏幕边缘自动滚动（手机上没它就没法把卡片拖到视口之外的位置）----
+  function scheduleAutoScroll() {
+    if (rafId !== null || !win || !win.requestAnimationFrame) return;
+    rafId = win.requestAnimationFrame(autoScrollTick);
+  }
+  function startAutoScroll() {
+    if (!win || !win.requestAnimationFrame) return;
+    scheduleAutoScroll();
+  }
+  function stopAutoScroll() {
+    if (rafId !== null && win && win.cancelAnimationFrame) win.cancelAnimationFrame(rafId);
+    rafId = null;
+  }
+  function autoScrollTick() {
+    rafId = null;
+    const drag = activeDrag;
+    if (!drag || !win.scrollBy) return;
+    const vh = win.innerHeight || 800;
+    let dy = 0;
+    if (drag.lastY < EDGE_ZONE_PX) dy = -Math.round(EDGE_MAX_SPEED * (1 - Math.max(drag.lastY, 0) / EDGE_ZONE_PX));
+    else if (drag.lastY > vh - EDGE_ZONE_PX) dy = Math.round(EDGE_MAX_SPEED * (1 - Math.max(vh - drag.lastY, 0) / EDGE_ZONE_PX));
+    if (dy) {
+      const before = win.scrollY;
+      win.scrollBy(0, dy);
+      if (win.scrollY !== before) refreshDropTarget(); // 画面滚了，落点要重算
     }
-    if (mirror && mirror.parentNode) {
-      mirror.parentNode.removeChild(mirror);
-    }
-    if (document.body && document.body.classList) {
-      document.body.classList.remove("is-sorting");
-    }
-
-    activeDrag = null;
+    scheduleAutoScroll();
   }
 
   function persistCurrentOrder() {
@@ -716,146 +827,131 @@ function initTrendDrag(trendsEl) {
     }
   }
 
-  // ---- 触屏事件 ----
+  // ---- 触屏事件：这里只负责"酝酿"长按；真正的手指移动/抬手由 document 层接管 ----
   trendsEl.addEventListener(
     "touchstart",
     (e) => {
-      if (e.touches.length !== 1) {
-        if (activeDrag) cancelDrag();
-        return;
-      }
+      if (activeDrag) return; // 拖拽中，交给 document 层
+      clearPress();
+      if (!e.touches || e.touches.length !== 1) return; // 多指（缩放）不参与排序
       const card = e.target && e.target.closest ? e.target.closest(".trend") : null;
       if (!card || card.parentElement !== trendsEl) return;
       const count = trendsEl.querySelectorAll ? trendsEl.querySelectorAll(".trend").length : (trendsEl.children ? trendsEl.children.length : 0);
       if (count <= 1) return;
 
       const t = e.touches[0];
-      touchStartX = t.clientX;
-      touchStartY = t.clientY;
+      pressCard = card;
+      pressX = t.clientX;
+      pressY = t.clientY;
 
-      dragTimer = setTimeout(() => {
-        dragTimer = null;
-        startDragging(card, touchStartX, touchStartY, t.clientX, t.clientY);
-      }, 350);
+      pressTimer = setTimeout(() => {
+        pressTimer = null;
+        const card0 = pressCard;
+        pressCard = null;
+        if (card0) startDragging(card0, pressX, pressY, pressX, pressY, "touch");
+      }, LONG_PRESS_MS);
     },
     { passive: true }
   );
 
+  /*
+   * 必须保持 { passive: false }：Chrome 只有在手势起点存在非 passive 的 touchmove 监听时
+   * 才会在滚动前等主线程，之后 preventDefault() 才拦得住拖拽过程中的页面滚动。
+   */
   trendsEl.addEventListener(
     "touchmove",
     (e) => {
-      if (e.touches.length !== 1) return;
-      const t = e.touches[0];
-
-      if (dragTimer) {
-        const dist = Math.hypot(t.clientX - touchStartX, t.clientY - touchStartY);
-        if (dist > 8) {
-          clearTimeout(dragTimer);
-          dragTimer = null;
-        }
-      }
-
       if (activeDrag) {
-        if (e.preventDefault) e.preventDefault();
-        updateDrag(t.clientX, t.clientY);
+        if (e.cancelable && e.preventDefault) e.preventDefault();
+        return; // 实际处理在 onDocTouchMove（拖拽期间原卡片仍是事件路径的一部分，这里只补一道防线）
       }
+      if (!pressTimer || !pressCard || !e.touches || !e.touches[0]) return;
+      const t = e.touches[0];
+      if (Math.hypot(t.clientX - pressX, t.clientY - pressY) > DRAG_SLOP_PX) clearPress(); // 想滚动页面，放弃长按
     },
     { passive: false }
   );
 
-  trendsEl.addEventListener("touchend", (e) => {
-    if (dragTimer) {
-      clearTimeout(dragTimer);
-      dragTimer = null;
-    }
-    if (activeDrag) {
-      if (e.preventDefault) e.preventDefault();
-      finishDrag();
-    }
-  });
+  trendsEl.addEventListener("touchend", () => clearPress());
+  trendsEl.addEventListener("touchcancel", () => clearPress());
 
-  trendsEl.addEventListener("touchcancel", () => {
-    if (dragTimer) {
-      clearTimeout(dragTimer);
-      dragTimer = null;
-    }
-    if (activeDrag) {
-      cancelDrag();
-    }
-  });
-
-  // ---- 桌面鼠标事件 ----
+  // ---- 桌面鼠标：按住 350ms 同样可拖拽（鼠标没有滚动冲突，中途移动不取消长按）----
   trendsEl.addEventListener("mousedown", (e) => {
     if (e.button !== 0) return;
+    if (activeDrag) return;
     const card = e.target && e.target.closest ? e.target.closest(".trend") : null;
     if (!card || card.parentElement !== trendsEl) return;
     const count = trendsEl.querySelectorAll ? trendsEl.querySelectorAll(".trend").length : (trendsEl.children ? trendsEl.children.length : 0);
     if (count <= 1) return;
 
+    clearPress();
     const startX = e.clientX;
     const startY = e.clientY;
+    let lastX = startX;
+    let lastY = startY;
 
     const onMouseMove = (me) => {
-      if (dragTimer) {
-        if (Math.hypot(me.clientX - startX, me.clientY - startY) > 6) {
-          clearTimeout(dragTimer);
-          dragTimer = null;
-          removeMouse();
-        }
-      }
-      if (activeDrag) {
-        if (me.preventDefault) me.preventDefault();
-        updateDrag(me.clientX, me.clientY);
-      }
+      lastX = me.clientX;
+      lastY = me.clientY;
+      if (!activeDrag) return;
+      if (me.preventDefault) me.preventDefault();
+      updateDrag(me.clientX, me.clientY);
     };
 
-    const onMouseUp = (me) => {
-      if (dragTimer) {
-        clearTimeout(dragTimer);
-        dragTimer = null;
-      }
-      if (activeDrag) {
-        if (me.preventDefault) me.preventDefault();
-        finishDrag();
-      }
+    const onMouseUp = () => {
+      clearPress();
+      if (activeDrag) finishDrag();
       removeMouse();
     };
 
     const removeMouse = () => {
-      if (typeof window !== "undefined") {
-        window.removeEventListener("mousemove", onMouseMove);
-        window.removeEventListener("mouseup", onMouseUp);
+      if (win) {
+        win.removeEventListener("mousemove", onMouseMove);
+        win.removeEventListener("mouseup", onMouseUp);
       }
     };
 
-    if (typeof window !== "undefined") {
-      window.addEventListener("mousemove", onMouseMove);
-      window.addEventListener("mouseup", onMouseUp);
+    if (win) {
+      win.addEventListener("mousemove", onMouseMove);
+      win.addEventListener("mouseup", onMouseUp);
     }
 
-    dragTimer = setTimeout(() => {
-      dragTimer = null;
-      startDragging(card, startX, startY, e.clientX, e.clientY);
-    }, 350);
+    pressCard = card;
+    pressX = startX;
+    pressY = startY;
+    pressTimer = setTimeout(() => {
+      pressTimer = null;
+      const card0 = pressCard;
+      pressCard = null;
+      if (!card0) return;
+      startDragging(card0, startX, startY, lastX, lastY, "mouse");
+      if (activeDrag) activeDrag.onMouseCleanup = removeMouse;
+    }, LONG_PRESS_MS);
   });
 
-  // 键盘取消（Esc）
-  if (typeof window !== "undefined") {
-    window.addEventListener("keydown", (e) => {
+  // 键盘取消（Esc）：回到原位
+  if (win) {
+    win.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && activeDrag) cancelDrag();
     });
   }
 
-  // 暴露控制器以便测试
-  trendsEl._trendDrag = {
+  // 暴露控制器以便测试 / 供重新渲染前中断拖拽
+  const ctl = {
     startDragging,
     updateDrag,
     finishDrag,
     cancelDrag,
     persistCurrentOrder,
     isDragging: () => Boolean(activeDrag),
+    abort: () => { clearPress(); if (activeDrag) cancelDrag(); },
   };
+  trendsEl._trendDrag = ctl;
+  return ctl;
 }
+
+/* 拖拽控制器句柄：重新渲染趋势区前必须先中断拖拽，否则被拖的卡片会被 innerHTML 一起清掉 */
+let trendDragCtl = null;
 
 /* ---------- 报告溯源跳转 ---------- */
 function jumpToReport(repId, itemName) {
@@ -1346,7 +1442,7 @@ if (aiCopyBtn) aiCopyBtn.addEventListener("click", async () => {
 
 /* ---------- 趋势折线图拖拽排序初始化 ---------- */
 const trendsRoot = $("trends");
-if (trendsRoot) initTrendDrag(trendsRoot);
+if (trendsRoot) trendDragCtl = initTrendDrag(trendsRoot);
 
 /* ---------- 添加指标面板 ---------- */
 const btnMetrics = $("btn-metrics");
