@@ -1,5 +1,15 @@
 # 弘慈住院报告追踪（hongci-report-tracker）
 
+> [!IMPORTANT]
+> **本项目已停更（2026-10-28）**
+>
+> 家人已出院，这个面板不再需要，我也没有精力继续维护了。线上实例不再更新，代码原样留在这里，供需要的人 fork 参考。
+>
+> - 线上实例不再更新：`hongci-reporter-tracker.pages.dev` / `hc.nemui.cn`（作者即将下线该部署）
+> - 历史报告已从 D1 全量导出留档（SQL / SQLite / Excel），云端数据不再更新
+> - **不再适配医院页面的任何变更，Issue / PR 不再跟进**
+> - 医院这套查询系统多年没改过，接口短期内大概率还是老样子；照下面「部署」一节 fork 自建仍然可行，但**不保证**一直有效
+
 给住院患者家属看的报告追踪面板。一键抓取**苏大附一院弘慈血液病医院**微信查询系统的住院检验报告与超声报告，归档到 Cloudflare D1，展示关键指标（白细胞 / 血红蛋白 / 血小板 / 中性粒细胞 / CRP）趋势图，支持一键生成 AI 分析提示词（复制到 DeepSeek 等问答式 AI 使用，**无需配置任何 API Key**）。
 
 > ⚠️ 本项目仅供家属参考，不构成任何医疗建议，所有结果请以主治医生解读为准。
@@ -52,6 +62,8 @@ Cloudflare D1（SQLite）：lab_reports / us_reports / meta
 - 医院查询无需鉴权（住院号即凭证）、无需会话 Cookie，Function 直接抓取
 
 ## 部署（约 10 分钟）
+
+> 官方实例已下线（见顶部停更声明），下面步骤供 fork 后自建使用。
 
 全程在 Cloudflare 控制台完成，无需安装任何工具。
 
@@ -134,7 +146,7 @@ Get-ChildItem test/fixtures/*.html | Where-Object { $_.Name -notlike '*.gbk.html
 - **有报告一直显示「医院未公布明细」？** 这是医院网页端的问题，不是抓取失败：微生物**培养及鉴定**类报告（外周血培养、单腔 PICC 培养、肛拭子培养等）在网页详情页只返回一句「该记录如果未查询,可以到楼层自助机器查询！」，没有任何数据——用手机在公众号里手动点开也是空的。程序会把这类报告照常归档并按「医院未公布明细」标注（带提示，不再反复重试）；需要具体结果请到病区楼层自助机查询，或向主管医生索取。若医院日后补齐明细，下一次刷新会自动更新归档。
 - **页面会被外人看到吗？** 配置 `ACCESS_PASSWORD` 后，全站需密码登录（Cookie 30 天有效，家人输一次即可）。需要更强保护可再叠加 Cloudflare Access（Zero Trust → Access → 添加应用）。
 - **想自动定时刷新？** Pages Functions 不支持 Cron Trigger。可以再建一个独立的 Cloudflare Worker（Cron）每天 POST 一次你的 `/api/refresh`，或用 GitHub Actions 定时触发。若配置了 `ACCESS_PASSWORD`，请求需带 Cookie：`hc_auth=<密码的SHA-256十六进制>`（例如 `curl -X POST -H "Cookie: hc_auth=$(echo -n '你的密码' | sha256sum | cut -d' ' -f1)" https://你的域名/api/refresh`）。注意单次请求最多抓 10 份新明细（重试要占子请求预算），首次全量归档请循环 POST 直到响应里 `has_more` 为 false **且 `failed_details` 为空**（后者代表这一轮有明细没抓到，值得再发一轮——同一份报告不会重复入库，网络恢复后就能补上）；日常增量一次就够。欢迎 PR 补充示例。
-- **其他医院能用吗？** 抓取解析是针对该医院查询系统页面结构写的。若你所在医院使用相同系统（页面结构一致），改 `HOSPITAL_BASE` 即可；否则需改写 `functions/_lib/scraper.js` 的解析函数，欢迎提 Issue/PR。
+- **其他医院能用吗？** 抓取解析是针对该医院查询系统页面结构写的。若你所在医院使用相同系统（页面结构一致），改 `HOSPITAL_BASE` 即可；否则需改写 `functions/_lib/scraper.js` 的解析函数（本项目已停更，fork 后自行改动即可）。
 
 ## 隐私与免责
 
